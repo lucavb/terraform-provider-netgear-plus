@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Advanced 802.1Q VLAN Configuration</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+<link rel="stylesheet" type="text/css" href="style.css?v1.10">
+<script  src="frame.js?v1.10" type="text/javascript"></script>
+<script  src="function.js?v1.10" type="text/javascript"></script>
+</head>
+
+<body onload="initTableCss();initRadioCtrlPage('advacedVlan'); initErrMsg('802.1Q');">
+<form method="post" action="8021qCf.cgi">
+<table class="detailsAreaContainer">
+<tr>
+<td><table class="tableStyle">
+<tr>
+<script>tbhdrTable("Advanced 802.1Q VLAN Status",'advance8021qVlanStatus')</script>
+</tr>
+<tr><td class="topTitleBottomBar" colspan="2"></td></tr>
+<tr><td class="paddingTableBody" colspan="2"><table class="tableStyle" id="tbl1" style="width:745px;">
+<tr>
+<td class="def firstCol" nowrap="">Advanced 802.1Q VLAN</td>
+<td class='def firstCol' nowrap=''><input class="radioStyle" type='radio' value='Disable' name='status' disabled /><span>Disable</span></td>
+<td class='def firstCol' nowrap=''><input class="radioStyle" type='radio' value='Enable' name='status' disabled checked/><span>Enable</span></td>
+</tr>
+</table>
+</td></tr>
+</table>
+</td></tr>
+
+<tr><td height='40'></td></tr>
+<tr id="tblDisplay">
+<td><table class="tableStyle">
+<input type="hidden" name="hiddVlan" value=""> 
+<tr>
+<script>tbhdrTable("VLAN Identifier Setting",'advance8021qVlanId')</script>
+</tr>
+<tr><td class="topTitleBottomBar" colspan="2"></td></tr>
+<tr><td class="paddingTableBody" colspan="2"><table class="tableStyle" id="tbl2" style="width:745px;">
+<tr class="trBgColor"><td class='border_left border_bottom' colspan='3'>
+<div class="right_th font11"><label>VLAN ID</label><input type="text" id="idSetInput" name="ADD_VLANID" maxlength="4" value="" oninput="return checkForNumber(1,4094,this);" onkeyup="enableAddBtn()" onclick="enableAddBtn()"/></div></td></tr>
+<tr id="g_1_1" class="tableHead">
+<input type='hidden' name='vlanNum' value='6'>
+<td class="def_TH spacer4Percent"><input type="checkbox" onclick="checkAllCheckedRows('vlanID')" name="checkALL" value="notchecked" ></td>
+<td class="def_TH">VLAN ID</td>
+<td class="def_TH">Port Members</td>
+</tr>
+
+<tr class="vlanID" class="tableTr"><td class="def firstCol"><input type="checkbox" name="vlanck0" value="1" onclick="checkOnclick('vlanID')" /></td>
+  <td class="def">1</td>
+  <td class="def">1&nbsp;2&nbsp;3&nbsp;&#8194;&nbsp;&#8194;&nbsp;6&nbsp;7&nbsp;8&nbsp;</td>
+</tr>
+
+<tr class="vlanID" class="tableTr"><td class="def firstCol"><input type="checkbox" name="vlanck1" value="5" onclick="checkOnclick('vlanID')" /></td>
+  <td class="def">5</td>
+  <td class="def">1&nbsp;2&nbsp;3&nbsp;4&nbsp;5&nbsp;6&nbsp;7&nbsp;8&nbsp;</td>
+</tr>
+
+<tr class="vlanID" class="tableTr"><td class="def firstCol"><input type="checkbox" name="vlanck2" value="10" onclick="checkOnclick('vlanID')" /></td>
+  <td class="def">10</td>
+  <td class="def">1&nbsp;2&nbsp;3&nbsp;4&nbsp;5&nbsp;6&nbsp;7&nbsp;8&nbsp;</td>
+</tr>
+
+<tr class="vlanID" class="tableTr"><td class="def firstCol"><input type="checkbox" name="vlanck3" value="1000" onclick="checkOnclick('vlanID')" /></td>
+  <td class="def">1000</td>
+  <td class="def">1&nbsp;2&nbsp;3&nbsp;4&nbsp;5&nbsp;6&nbsp;7&nbsp;8&nbsp;</td>
+</tr>
+
+<tr class="vlanID" class="tableTr"><td class="def firstCol"><input type="checkbox" name="vlanck4" value="1001" onclick="checkOnclick('vlanID')" /></td>
+  <td class="def">1001</td>
+  <td class="def">1&nbsp;2&nbsp;3&nbsp;4&nbsp;5&nbsp;6&nbsp;7&nbsp;8&nbsp;</td>
+</tr>
+
+<tr class="vlanID" class="tableTr"><td class="def firstCol"><input type="checkbox" name="vlanck5" value="4094" onclick="checkOnclick('vlanID')" /></td>
+  <td class="def">4094</td>
+  <td class="def">1&nbsp;2&nbsp;&#8194;&nbsp;&#8194;&nbsp;&#8194;&nbsp;&#8194;&nbsp;&#8194;&nbsp;8&nbsp;</td>
+</tr>
+
+</table>
+</td></tr>
+</table>
+</td></tr>
+
+<input type="hidden" name='hash' id='hash' value='deadbeefcafebabe'>
+<input type=hidden name='err_msg' id='err_msg' value='' disabled>
+<input name="ACTION" id="ACTION" value="" type="hidden">
+</form>
+<script>
+var str = CreateButtons('button','Delete','javascript:void(0)','btn_Delete','off');
+str += CreateButtons('button','Add','javascript:void(0)','btn_Add','off');
+PaintButtons(str);
+</script>
+</body>
+</html>

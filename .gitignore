@@ -1,0 +1,13 @@
+captures/
+dist/
+coverage/
+__pycache__/
+examples/live-test/
+examples/live-test/.terraform/
+examples/live-test/.terraform.lock.hcl
+examples/live-test/.providers/
+examples/live-test/terraformrc.tfrc
+examples/live-test/*.tfstate
+examples/live-test/*.tfstate.*
+examples/live-test/*.tfvars
+examples/live-test/*.sops.yaml
