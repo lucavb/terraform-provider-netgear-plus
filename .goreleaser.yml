@@ -22,7 +22,7 @@ builds:
 
 archives:
   - id: provider
-    builds:
+    ids:
       - provider
     formats:
       - tar.gz
