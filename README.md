@@ -117,6 +117,10 @@ The switch can still report firmware lockouts if other clients are logging in at
 
 When debugging repeated lockouts, simplify the configuration to one read path at a time. Start with either `data.netgear_plus_switch.target` or `data.netgear_plus_vlan_state.current`, confirm that it succeeds consistently, and only then add the second data source or managed resource back in.
 
+If you are using this provider with your own switch and want to avoid the stock firmware lockout mechanism entirely, the repository includes the optional helper script `patch_lockout.py`. It patches a specific `GS108Ev3` firmware image to bypass the login lockout checks and recomputes the firmware checksum.
+
+This script has only been tested with `GS108Ev3`. It modifies vendor firmware, is completely outside the provider's supported runtime behavior, and you use it entirely at your own risk. I take absolutely no responsibility for bricked devices, failed flashes, or any other damage whatsoever.
+
 ## Live Testing
 
 The checked-in live example stays focused on local operator workflows such as local provider mirrors and SOPS-backed secrets. See `examples/live-test/README.md` if you want a real-device workflow starting from read-only discovery before moving to managed changes.

@@ -113,6 +113,10 @@ This avoids treating unknown live VLANs as safe to delete before you have valida
 
 If live runs feel slow, the default pacing is deliberate. If the switch is still touchy, raise `request_spacing` above `5`.
 
+If you are using this provider with your own switch and want to avoid the stock firmware lockout mechanism entirely, the repository includes the optional helper script `patch_lockout.py`. It patches a specific `GS108Ev3` firmware image to bypass the login lockout checks and recomputes the firmware checksum.
+
+This script has only been tested with `GS108Ev3`. It modifies vendor firmware, is completely outside the provider's supported runtime behavior, and you use it entirely at your own risk. I take absolutely no responsibility for bricked devices, failed flashes, or any other damage whatsoever.
+
 ## Argument Reference
 
 - `host` - (Required) Switch hostname or URL.
