@@ -7,8 +7,9 @@ Terraform provider for Netgear Plus switches, currently scoped to `GS108Ev3`.
 This project is usable for careful, operator-driven testing, but it is still an early provider.
 
 - Supported model: `GS108Ev3`
-- Provider source: `lucavb/netgear-plus`
-- Release flow: GitHub Actions + GoReleaser
+- Terraform source: `lucavb/netgear-plus`
+- OpenTofu source: `registry.terraform.io/lucavb/netgear-plus`
+- Release flow: GitHub Actions + GoReleaser + Terraform Registry publish
 - Current maturity: prototype, not production-grade
 
 ## What It Does
@@ -37,7 +38,7 @@ Configure VLAN membership with repeated `vlan {}` blocks. For generated configur
 terraform {
   required_providers {
     netgear_plus = {
-      source = "lucavb/netgear-plus"
+      source = "registry.terraform.io/lucavb/netgear-plus"
     }
   }
 }
@@ -89,6 +90,8 @@ resource "netgear_plus_vlan_state" "switch" {
 }
 ```
 
+For Terraform CLI, `source = "lucavb/netgear-plus"` is also valid. For OpenTofu, prefer the fully qualified `registry.terraform.io/lucavb/netgear-plus` source unless and until the provider is also published in the OpenTofu Registry.
+
 ## Safety Model
 
 This provider is optimized for correctness over breadth on `GS108Ev3`.
@@ -137,8 +140,11 @@ When debugging repeated lockouts, simplify the configuration to one read path at
 ## Development And Releases
 
 - GitHub Actions runs validation on pushes and pull requests.
-- Tagged releases are built and published by GoReleaser.
-- Create a tag such as `v0.1.0` on `main` to publish a GitHub release with build artifacts.
+- Tagged releases are built by GoReleaser and uploaded to GitHub Releases with Terraform Registry-compatible artifacts.
+- Release signing requires the GitHub Actions secrets `GPG_PRIVATE_KEY` and `PASSPHRASE`.
+- The repository root must contain `terraform-registry-manifest.json` so the registry can detect protocol metadata.
+- Create a tag such as `v0.1.0` on `main` to publish a signed GitHub release.
+- After the signed release exists, publish the provider in the Terraform Registry under `lucavb/netgear-plus`.
 
 ## Production-Grade Follow-Up
 

@@ -9,9 +9,12 @@ before:
 builds:
   - id: provider
     main: .
-    binary: terraform-provider-netgear-plus
+    binary: "{{ .ProjectName }}_v{{ .Version }}"
     env:
       - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
     goos:
       - darwin
       - linux
@@ -25,17 +28,26 @@ archives:
     ids:
       - provider
     formats:
-      - tar.gz
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
-    files:
-      - LICENSE
-      - README.md
+      - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
-  name_template: checksums.txt
+  extra_files:
+    - glob: terraform-registry-manifest.json
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+signs:
+  - artifacts: checksum
+    args:
+      - --batch
+      - --local-user
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - --output
+      - "${signature}"
+      - --detach-sign
+      - "${artifact}"
 
 changelog:
   sort: asc
@@ -46,6 +58,9 @@ changelog:
       - "^chore:"
 
 release:
+  extra_files:
+    - glob: terraform-registry-manifest.json
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
   github:
     owner: lucavb
     name: terraform-provider-netgear-plus
