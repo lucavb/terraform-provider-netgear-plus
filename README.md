@@ -9,30 +9,17 @@ This project is usable for careful, operator-driven testing, but it is still an 
 - Supported model: `GS108Ev3`
 - Terraform source: `lucavb/netgear-plus`
 - OpenTofu source: `registry.terraform.io/lucavb/netgear-plus`
-- Release flow: GitHub Actions + GoReleaser + Terraform Registry publish
 - Current maturity: prototype, not production-grade
 
 ## What It Does
 
-- reads switch facts with `netgear_plus_switch`
+- reads switch identity and firmware facts with `netgear_plus_switch`
 - reads live VLAN and PVID state with `netgear_plus_vlan_state`
 - manages authoritative VLAN membership and PVID state with `netgear_plus_vlan_state`
 
-## Build
-
-```sh
-go build ./...
-```
-
-## Test
-
-```sh
-go test ./...
-```
-
 ## Example
 
-Configure VLAN membership with repeated `vlan {}` blocks. For generated configurations, use `dynamic "vlan"` to emit those blocks rather than assigning `vlan = [...]`.
+Use the fully qualified provider source for OpenTofu:
 
 ```hcl
 terraform {
@@ -42,7 +29,11 @@ terraform {
     }
   }
 }
+```
 
+Terraform CLI can also use the shorthand source `lucavb/netgear-plus`.
+
+```hcl
 provider "netgear_plus" {
   host            = "192.0.2.10"
   password        = var.switch_password
@@ -90,7 +81,20 @@ resource "netgear_plus_vlan_state" "switch" {
 }
 ```
 
-For Terraform CLI, `source = "lucavb/netgear-plus"` is also valid. For OpenTofu, prefer the fully qualified `registry.terraform.io/lucavb/netgear-plus` source unless and until the provider is also published in the OpenTofu Registry.
+Configure VLAN membership with repeated `vlan {}` blocks. If you generate configuration, use `dynamic "vlan"` to emit those blocks rather than assigning `vlan = [...]`.
+
+## Safe First Use
+
+Start in read-only mode first:
+
+1. Read `data.netgear_plus_switch.target`.
+2. Read `data.netgear_plus_vlan_state.current`.
+3. Copy the live VLANs and PVIDs into `netgear_plus_vlan_state`.
+4. Set `expected_serial_number` from the switch data source.
+5. Make one additive change only.
+6. Apply with `allow_vlan_deletions = false`.
+
+This avoids treating unknown live VLANs as safe to remove before delete semantics are proven on hardware.
 
 ## Safety Model
 
@@ -100,22 +104,6 @@ This provider is optimized for correctness over breadth on `GS108Ev3`.
 - VLAN deletions are disabled by default. A plan that would remove switch VLANs fails unless `allow_vlan_deletions = true` is set explicitly.
 - Live `create` and `update` require `expected_serial_number` so the provider fails closed if it connects to the wrong switch.
 - `destroy` removes Terraform state only. It does not roll VLAN settings back on the device.
-
-## Import-First Workflow
-
-Use the provider in read-only mode first.
-
-1. Read `data.netgear_plus_switch.target` and `data.netgear_plus_vlan_state.current`.
-2. Copy the live VLAN and PVID state into `netgear_plus_vlan_state`.
-3. Set `expected_serial_number` from the switch data source.
-4. Make one additive change only.
-5. Apply with `allow_vlan_deletions = false`.
-
-This avoids treating unknown live VLANs as safe to remove before delete semantics are proven on hardware.
-
-## Live Testing
-
-Live switch exercises are intentionally kept out of the public repository history because they are local-operator material. If you want a real-device workflow, build a local test configuration from the provider schema and start with read-only data sources before attempting any managed VLAN changes.
 
 ## Session Safety
 
@@ -129,6 +117,10 @@ The switch can still report firmware lockouts if other clients are logging in at
 
 When debugging repeated lockouts, simplify the configuration to one read path at a time. Start with either `data.netgear_plus_switch.target` or `data.netgear_plus_vlan_state.current`, confirm that it succeeds consistently, and only then add the second data source or managed resource back in.
 
+## Live Testing
+
+The checked-in live example stays focused on local operator workflows such as local provider mirrors and SOPS-backed secrets. See `examples/live-test/README.md` if you want a real-device workflow starting from read-only discovery before moving to managed changes.
+
 ## Known Limits
 
 - `GS108Ev3` is the only supported model.
@@ -137,7 +129,21 @@ When debugging repeated lockouts, simplify the configuration to one read path at
 - Import identity still uses `model@host`; the serial-number pin is the live-apply safety mechanism.
 - The checked-in tests cover parsing and mock-driver behavior, not full hardware acceptance.
 
-## Development And Releases
+## Development
+
+Build:
+
+```sh
+go build ./...
+```
+
+Test:
+
+```sh
+go test ./...
+```
+
+## Releases
 
 - GitHub Actions runs validation on pushes and pull requests.
 - Tagged releases are built by GoReleaser and uploaded to GitHub Releases with Terraform Registry-compatible artifacts.

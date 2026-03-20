@@ -2,7 +2,7 @@
 page_title: "netgear_plus_vlan_state Resource"
 subcategory: ""
 description: |-
-  Manage authoritative VLAN membership and PVID state on a Netgear Plus GS108Ev3 device.
+  Manage authoritative VLAN membership and PVID state on a Netgear Plus GS108Ev3 device with conservative safety checks.
 ---
 
 # netgear_plus_vlan_state Resource
@@ -15,10 +15,14 @@ This resource is intentionally conservative:
 - VLAN deletions are blocked unless `allow_vlan_deletions = true`.
 - Destroy removes Terraform state only and leaves switch configuration unchanged.
 
+Use this resource only after you have read the live switch state with `netgear_plus_switch` and `netgear_plus_vlan_state`.
+
 ## Example Usage
 
 ```hcl
 data "netgear_plus_switch" "target" {}
+
+data "netgear_plus_vlan_state" "current" {}
 
 resource "netgear_plus_vlan_state" "switch" {
   expected_serial_number = data.netgear_plus_switch.target.serial_number
@@ -55,26 +59,44 @@ resource "netgear_plus_vlan_state" "switch" {
 }
 ```
 
-## Schema
+## Safe Workflow
 
-### Required
+1. Read `data.netgear_plus_switch.target` to confirm the switch identity.
+2. Read `data.netgear_plus_vlan_state.current` to capture the current VLAN and PVID layout.
+3. Copy that live state into `netgear_plus_vlan_state`.
+4. Make one additive change only.
+5. Keep `allow_vlan_deletions = false` until delete behavior has been validated on the target device.
 
-- `pvids` (Map of Number) Complete per-port PVID map for the switch.
-- `vlan` (Block List, Min: 1) Complete authoritative VLAN definition for the switch.
+Because this resource is authoritative, omitting a VLAN means "Terraform should remove it" once deletions are enabled.
 
-### Optional
+## Argument Reference
 
-- `allow_vlan_deletions` (Boolean) Allow authoritative removal of VLANs omitted from configuration. Defaults to `false`.
-- `expected_serial_number` (String) Expected device serial number. Create and update fail if the connected switch does not match.
+- `pvids` - (Required) Complete per-port PVID map for the switch.
+- `vlan` - (Required) Complete authoritative VLAN definition for the switch. At least one block is required.
+- `allow_vlan_deletions` - (Optional) Allow authoritative removal of VLANs omitted from configuration. Defaults to `false`.
+- `expected_serial_number` - (Optional, but strongly recommended for all live changes) Expected device serial number. Create and update fail if the connected switch does not match.
 
-### Read-Only
+## Attribute Reference
 
-- `id` (String) Stable switch identifier.
+- `id` - Stable switch identifier.
 
-### Nested Schema for `vlan`
+## Nested Block: `vlan`
 
-- `id` (Number) VLAN ID.
-- `ports` (Map of String) Per-port membership map using `untagged` or `tagged`. Omitted ports are normalized to `ignored`.
+- `id` - VLAN ID.
+- `ports` - Per-port membership map using `untagged` or `tagged`. Omitted ports are normalized to `ignored`.
+
+Example membership map:
+
+```hcl
+vlan {
+  id = 10
+  ports = {
+    "3" = "untagged"
+    "4" = "untagged"
+    "8" = "tagged"
+  }
+}
+```
 
 ## Import
 

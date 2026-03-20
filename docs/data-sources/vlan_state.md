@@ -2,7 +2,7 @@
 page_title: "netgear_plus_vlan_state Data Source"
 subcategory: ""
 description: |-
-  Read live VLAN membership and PVID state from a Netgear Plus GS108Ev3 device.
+  Read live VLAN membership and PVID state from a Netgear Plus GS108Ev3 device before managing it authoritatively.
 ---
 
 # netgear_plus_vlan_state Data Source
@@ -15,15 +15,22 @@ Use `netgear_plus_vlan_state` to read the live VLAN and PVID state from the targ
 data "netgear_plus_vlan_state" "current" {}
 ```
 
-## Schema
+Typical import-first workflow:
 
-### Read-Only
+1. Run `data.netgear_plus_switch.target`.
+2. Run `data.netgear_plus_vlan_state.current`.
+3. Copy the returned VLANs and PVIDs into `netgear_plus_vlan_state`.
+4. Make one additive change only.
 
-- `id` (String) Stable switch identifier.
-- `pvids` (Map of Number) Per-port PVID map.
-- `vlan` (List of Objects) Live VLAN definitions.
+This data source helps you avoid guessing at the live configuration before enabling management.
 
-### Nested Schema for `vlan`
+## Attribute Reference
 
-- `id` (Number) VLAN ID.
-- `ports` (Map of String) Per-port membership map. Values are switch membership modes such as `untagged`, `tagged`, or `ignored`.
+- `id` - Stable switch identifier.
+- `pvids` - Per-port PVID map.
+- `vlan` - Live VLAN definitions.
+
+## Nested Attributes for `vlan`
+
+- `id` - VLAN ID.
+- `ports` - Per-port membership map. Values are switch membership modes such as `untagged`, `tagged`, or `ignored`.
