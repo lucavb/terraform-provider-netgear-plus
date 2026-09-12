@@ -253,9 +253,37 @@ func (p *netgearPlusProvider) DataSources(_ context.Context) []func() datasource
 	}
 }
 
-func withDriverForHost(ctx context.Context, data *providerData, fn func(client.Driver) error) error {
+// withSwitchTransport selects the transport for the dual-transport
+// resources and data sources (netgear_plus_vlan_state, netgear_plus_switch,
+// netgear_plus_vlan_state data source), runs fn under the per-device
+// mutex/pacing, and hands fn the transport as the switchTransport
+// interface — the resource layer never sees a concrete client type.
+//
+// Transport selection rule (dual-transport, implemented):
+//   - agent_mac set              -> NSDP adapter via withNSDPClient: the
+//     shared device lock (deviceLockKey — the same lock domain as the
+//     NSDP-native resources and the HTTP branch, so HTTP and NSDP
+//     operations against the same physical switch can never interleave),
+//     the nsdp_client.go client cache, and the retry-once-on-auth-
+//     failure rule. Preferred when both agent_mac and host are
+//     configured — this must be called out in the provider docs.
+//   - agent_mac unset, host set  -> HTTP adapter, byte-identical to the
+//     pre-dual-transport behavior (session cache, invalidation on
+//     ShouldInvalidateSession).
+//   - neither set                -> the historical host error below.
+func withSwitchTransport(ctx context.Context, data *providerData, fn func(switchTransport) error) error {
 	if data == nil {
 		return fmt.Errorf("provider is not configured")
+	}
+
+	if data.agentMAC != "" {
+		return withNSDPClient(ctx, data, func(client nsdpClient) error {
+			return fn(nsdpSwitchTransport{
+				client:     client,
+				agentMAC:   data.agentMAC,
+				resourceID: portConfigResourceID(data), // nsdp@<device lock key>
+			})
+		})
 	}
 
 	if strings.TrimSpace(data.config.Host) == "" {
@@ -281,7 +309,7 @@ func withDriverForHost(ctx context.Context, data *providerData, fn func(client.D
 		return err
 	}
 
-	if err := fn(driver); err != nil {
+	if err := fn(httpSwitchTransport{driver: driver, resourceID: data.resourceID()}); err != nil {
 		if driver.ShouldInvalidateSession(err) {
 			data.invalidateCachedDriver(ctx)
 		}
@@ -357,6 +385,15 @@ func (d *providerData) resourceID() string {
 func operationError(summary string, err error) error {
 	if err == nil {
 		return nil
+	}
+
+	// A typed provider operation error (guards, refusals) keeps its own
+	// summary and detail — re-wrapping would bury the typed message
+	// under a generic one. HTTP transport errors are never typed, so
+	// this pass-through only affects the NSDP path's guard errors.
+	var opErr *providerOperationError
+	if errors.As(err, &opErr) {
+		return opErr
 	}
 
 	return &providerOperationError{

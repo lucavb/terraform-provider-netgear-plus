@@ -206,7 +206,7 @@ func TestWithDriverForHostReusesCachedDriverAndSerializesCalls(t *testing.T) {
 	}
 
 	go func() {
-		errCh <- withDriverForHost(ctx, data, func(client.Driver) error {
+		errCh <- withSwitchTransport(ctx, data, func(switchTransport) error {
 			close(firstEntered)
 			<-releaseFirst
 			return nil
@@ -216,7 +216,7 @@ func TestWithDriverForHostReusesCachedDriverAndSerializesCalls(t *testing.T) {
 	<-firstEntered
 
 	go func() {
-		errCh <- withDriverForHost(ctx, data, func(client.Driver) error {
+		errCh <- withSwitchTransport(ctx, data, func(switchTransport) error {
 			secondEntered <- struct{}{}
 			return nil
 		})
@@ -240,7 +240,7 @@ func TestWithDriverForHostReusesCachedDriverAndSerializesCalls(t *testing.T) {
 		select {
 		case err := <-errCh:
 			if err != nil {
-				t.Fatalf("withDriverForHost() error = %v", err)
+				t.Fatalf("withSwitchTransport() error = %v", err)
 			}
 		case <-ctx.Done():
 			t.Fatalf("timed out waiting for helper result: %v", ctx.Err())
@@ -302,14 +302,14 @@ func TestWithDriverForHostInvalidatesCachedDriverOnConfigChange(t *testing.T) {
 		},
 	}
 
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return nil }); err != nil {
-		t.Fatalf("first withDriverForHost() error = %v", err)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return nil }); err != nil {
+		t.Fatalf("first withSwitchTransport() error = %v", err)
 	}
 
 	data.config.Password = "second-password"
 
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return nil }); err != nil {
-		t.Fatalf("second withDriverForHost() error = %v", err)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return nil }); err != nil {
+		t.Fatalf("second withSwitchTransport() error = %v", err)
 	}
 
 	mu.Lock()
@@ -364,14 +364,14 @@ func TestWithDriverForHostInvalidatesCachedDriverOnRequestSpacingChange(t *testi
 		},
 	}
 
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return nil }); err != nil {
-		t.Fatalf("first withDriverForHost() error = %v", err)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return nil }); err != nil {
+		t.Fatalf("first withSwitchTransport() error = %v", err)
 	}
 
 	data.config.RequestSpacing = 2 * time.Millisecond
 
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return nil }); err != nil {
-		t.Fatalf("second withDriverForHost() error = %v", err)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return nil }); err != nil {
+		t.Fatalf("second withSwitchTransport() error = %v", err)
 	}
 
 	mu.Lock()
@@ -416,8 +416,8 @@ func TestWithDriverForHostInvalidatesCachedDriverOnCallbackError(t *testing.T) {
 	}
 
 	wantErr := errors.New("boom")
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return wantErr }); !errors.Is(err, wantErr) {
-		t.Fatalf("withDriverForHost() error = %v, want %v", err, wantErr)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("withSwitchTransport() error = %v, want %v", err, wantErr)
 	}
 
 	mu.Lock()
@@ -429,8 +429,8 @@ func TestWithDriverForHostInvalidatesCachedDriverOnCallbackError(t *testing.T) {
 	}
 	mu.Unlock()
 
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return nil }); err != nil {
-		t.Fatalf("withDriverForHost() after invalidation error = %v", err)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return nil }); err != nil {
+		t.Fatalf("withSwitchTransport() after invalidation error = %v", err)
 	}
 
 	mu.Lock()
@@ -472,12 +472,12 @@ func TestWithDriverForHostPreservesCachedDriverOnNonSessionError(t *testing.T) {
 	}
 
 	wantErr := errors.New("boom")
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return wantErr }); !errors.Is(err, wantErr) {
-		t.Fatalf("withDriverForHost() error = %v, want %v", err, wantErr)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("withSwitchTransport() error = %v, want %v", err, wantErr)
 	}
 
-	if err := withDriverForHost(ctx, data, func(client.Driver) error { return nil }); err != nil {
-		t.Fatalf("withDriverForHost() after non-session error = %v", err)
+	if err := withSwitchTransport(ctx, data, func(switchTransport) error { return nil }); err != nil {
+		t.Fatalf("withSwitchTransport() after non-session error = %v", err)
 	}
 
 	mu.Lock()
@@ -510,11 +510,11 @@ func TestWithDriverForHostWaitsBetweenOperations(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		if err := withDriverForHost(ctx, data, func(client.Driver) error {
+		if err := withSwitchTransport(ctx, data, func(switchTransport) error {
 			starts = append(starts, time.Now())
 			return nil
 		}); err != nil {
-			t.Fatalf("withDriverForHost() error = %v", err)
+			t.Fatalf("withSwitchTransport() error = %v", err)
 		}
 	}
 
@@ -554,6 +554,16 @@ func (c *stubNSDPClient) SetQoSMode(nsdp.QoSMode) error       { return nil }
 func (c *stubNSDPClient) SetBlockUnknownMulticast(bool) error { return nil }
 func (c *stubNSDPClient) SetPortMirroring(int, []int) error   { return nil }
 func (c *stubNSDPClient) SetPortBasedVLAN(int, []int) error   { return nil }
+func (c *stubNSDPClient) Get8021QVLANs() ([]nsdp.VLAN8021QMembership, error) {
+	return nil, nil
+}
+func (c *stubNSDPClient) GetPVIDs() ([]nsdp.PVIDEntry, error) { return nil, nil }
+func (c *stubNSDPClient) GetIdentity() (nsdp.SwitchIdentity, error) {
+	return nsdp.SwitchIdentity{}, nil
+}
+func (c *stubNSDPClient) Set8021QVLAN(int, []int, []int) error { return nil }
+func (c *stubNSDPClient) Delete8021QVLAN(int) error            { return nil }
+func (c *stubNSDPClient) SetPVID(int, int) error               { return nil }
 
 // providerConfigureRequest builds a framework ConfigureRequest whose config
 // carries the given attribute values; every other schema attribute is
@@ -1023,7 +1033,7 @@ func TestHTTPAndNSDPOperationsShareDeviceLock(t *testing.T) {
 	<-entered
 
 	go func() {
-		httpErr <- withDriverForHost(ctx, data, func(client.Driver) error { return nil })
+		httpErr <- withSwitchTransport(ctx, data, func(switchTransport) error { return nil })
 	}()
 
 	select {
@@ -1042,7 +1052,7 @@ func TestHTTPAndNSDPOperationsShareDeviceLock(t *testing.T) {
 			}
 		case err := <-httpErr:
 			if err != nil {
-				t.Fatalf("withDriverForHost() error = %v", err)
+				t.Fatalf("withSwitchTransport() error = %v", err)
 			}
 		case <-ctx.Done():
 			t.Fatalf("timed out waiting for operations: %v", ctx.Err())
