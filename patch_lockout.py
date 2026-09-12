@@ -34,6 +34,12 @@ Lockout mechanism (reverse engineered from the 8051 image, v2.06.24GR):
     sites 5,7,8 NOP the 16-byte 32-bit deficit SUBB chains: load/store stay,
                 the value never decrements (deficit stays 0 forever)
     site 9      NOP the 3-byte submit-failure flag store (0xA699 = 1)
+    sites 10-11 web UI footer strings (HTML data area, not code): replace
+                "&copy; NETGEAR, Inc. All rights reserved." with the
+                same-length "[PATCHED] &copy; NETGEAR Inc. LOCKOUT OFF"
+                marker, so a glance at any web UI page footer shows whether
+                the firmware is patched. Byte-for-byte in place, so no
+                position in the image shifts.
 
   Everything else (state normalization, page rendering, entry-table walk,
   session handling) is left untouched, so the web UI keeps working.
@@ -43,9 +49,9 @@ Lockout mechanism (reverse engineered from the 8051 image, v2.06.24GR):
   request spacing (see README request_spacing=5).
 
   Provenance: only the two-gate patch (sites 1-2) has been flashed to and
-  run on real hardware. Sites 3-9 are reverse-engineering only; the 9-site
-  output has never been flashed. There is no documented recovery mode for
-  this hardware - a failed flash likely bricks the switch.
+  run on real hardware. Sites 3-11 are reverse-engineering only; the fully
+  patched output has never been flashed. There is no documented recovery
+  mode for this hardware - a failed flash likely bricks the switch.
 
   Security note: this removes the login lockout and the per-request
   CHECK_AUTH re-validation, so failed password attempts are no longer cut
@@ -74,6 +80,8 @@ Patch sites (EN offsets; GR address = offset + 0x11):
   0x9972  16-byte SUBB -> NOPs   9826 deficit decrement (negative HLR)
   0x9A1A  16-byte SUBB -> NOPs   9826 deficit decrement (auth check)
   0x9BC8  74 01 F0 -> NOPs      9A48 submit-failure flag store
+  0x4705B 41-byte footer string  web UI footer, page 1 (<span class="rights">)
+  0x78907 41-byte footer string  web UI footer, page 2
 
 Usage: python3 patch_lockout.py [input.bin] [output.bin]
   Re-running on an output of this script (or of the older 2-site version)
@@ -97,6 +105,13 @@ EXPECTED_SHA256 = (
 )
 PRISTINE_CHECKSUM_FIELD = b"9C6B"  # checksum field of the unpatched image
 
+# Same-length web UI footer marker: replaces the 41-byte
+# "&copy; NETGEAR, Inc. All rights reserved." string in place (byte-for-byte,
+# same length) so no position in the image shifts. HTML-safe ASCII.
+ORIG_FOOTER = b"&copy; NETGEAR, Inc. All rights reserved."
+FOOTER_MARKER = b"[PATCHED] &copy; NETGEAR Inc. LOCKOUT OFF"
+assert len(FOOTER_MARKER) == len(ORIG_FOOTER), "footer marker must be same length as original"
+
 # (offset, original bytes, patched bytes, description)
 # Offsets are EN file offsets; the GR firmware has the same code at +0x11.
 PATCHES = [
@@ -118,7 +133,16 @@ PATCHES = [
      "9826: NOP deficit decrement after auth-check (SUBB chain on 0xA5D1)"),
     (0x9BC8, bytes.fromhex("7401f0"), b"\x00" * 3,
      "9A48: NOP submit-failure flag store (0xA699 = 1)"),
+    (0x4705B, ORIG_FOOTER, FOOTER_MARKER,
+     "web UI footer marker (page with <span class=\"rights\">)"),
+    (0x78907, ORIG_FOOTER, FOOTER_MARKER,
+     "web UI footer marker (page with plain <span> footer)"),
 ]
+
+# Invariant: every patch must be length-preserving (in-place byte
+# replacement) so no code, data, or string position shifts in the image.
+for _offset, _orig, _patched, _desc in PATCHES:
+    assert len(_orig) == len(_patched), f"non length-preserving site: {_desc}"
 
 # Context bytes around each patch site for validation.
 # Surrounding 8051 instructions confirm we're in the correct function,
@@ -139,6 +163,9 @@ CONTEXT_CHECKS = [
     (0x9A13, bytes.fromhex("90a5d1120a9ac3")),  # MOV DPTR,#0xA5D1; LCALL 0x0A9A; CLR CY
     # --- 9A48 (login SUBMIT handler) ---
     (0x9BC5, bytes.fromhex("90a699")),  # MOV DPTR,#0xA699 (failure flag)
+    # --- web UI footer marker sites ---
+    (0x47053, b'rights">'),  # <span class="rights"> footer, page 1
+    (0x78901, b"<span>"),    # plain <span> footer, page 2
 ]
 
 HEADER_CHECK = (0x22, b"GS108Ev3")
