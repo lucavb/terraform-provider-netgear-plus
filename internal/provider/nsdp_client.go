@@ -46,10 +46,11 @@ type nsdpClient interface {
 	// VLAN, Delete8021QVLAN removes one (idempotent, live-proven),
 	// SetPVID writes one port's PVID.
 	//
-	// GAP-1 PENDING: Set8021QVLAN's tagged/untagged payload order and
-	// Get8021QVLANs' reply role interpretation follow the library's
-	// ProSafeLinux-derived assumption; see internal/nsdp/vlan.go for the
-	// pending-verdict swap matrix.
+	// GAP-1 RESOLVED (ROUND 19 live probe, 2026-09-12): the 0x2800
+	// entry is {vlan_id u16 BE, MEMBER bitmap, TAGGED bitmap} —
+	// untagged is derived (member AND NOT tagged). Set8021QVLAN sends
+	// member = tagged|untagged, tagged; Get8021QVLANs decodes through
+	// the same model (internal/nsdp/vlan.go).
 	Get8021QVLANs() ([]nsdp.VLAN8021QMembership, error)
 	GetPVIDs() ([]nsdp.PVIDEntry, error)
 	GetIdentity() (nsdp.SwitchIdentity, error)

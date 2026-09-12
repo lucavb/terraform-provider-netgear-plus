@@ -291,21 +291,24 @@ func TestVLANStateNSDPEngineModeRefusal(t *testing.T) {
 	}
 }
 
-// TestVLANStateNSDPRoleMismatchFailsVerification pins the GAP-1 safety
-// contract: with the fake's 0x2800 replies role-swapped (nsdptest's
-// Reply8021QRolesSwapped mirror), the apply still writes the desired
-// roles but the verify read reports the swapped roles — the apply must
-// surface a typed verification/drift error, NEVER silent success. This
-// is what carries the provider across the pending GAP-1 live verdict.
-func TestVLANStateNSDPRoleMismatchFailsVerification(t *testing.T) {
+// TestVLANStateNSDPMembershipDropFailsVerification pins the
+// verify-corrective safety contract against the REAL firmware behavior
+// observed on the casalta GS108Ev3 (ROUND 19, 2026-09-12): a 0x2800 SET
+// whose tagged bits are not a subset of its member bits is silently
+// dropped — reply OK, VLAN stored with EMPTY membership. With the
+// fake's Reply8021QMembershipDropped knob replaying that drop, the
+// apply still writes the desired membership but the verify read
+// reports the empty one — the apply must surface a typed
+// verification/drift error, NEVER silent success.
+func TestVLANStateNSDPMembershipDropFailsVerification(t *testing.T) {
 	t.Parallel()
 
 	fake := newNSDPVLANStateFake()
-	fake.Reply8021QRolesSwapped = true
+	fake.Reply8021QMembershipDropped = true
 	data := newNSDPSelectedTestData(fake)
 
-	// VLAN 10 with a tagged member (port 3): the role swap makes the
-	// read-back report port 3 untagged instead.
+	// VLAN 10 with a tagged member (port 3): the silent drop makes the
+	// read-back report VLAN 10 (and VLAN 1) with empty membership.
 	plan := nsdpVLANStatePlan()
 	plan.VLANs = vlanStateBlocks(map[int]map[string]string{
 		1:  {"1": "untagged", "2": "untagged", "4": "untagged", "5": "untagged", "6": "untagged", "7": "untagged", "8": "untagged"},
@@ -317,13 +320,13 @@ func TestVLANStateNSDPRoleMismatchFailsVerification(t *testing.T) {
 
 	resp := createVLANState(t, data, plan)
 	if !resp.Diagnostics.HasError() {
-		t.Fatal("role-mismatched verify must fail the apply — silent success would mask GAP-1")
+		t.Fatal("silently-dropped membership must fail the apply — silent success would mask the firmware's empty-store behavior")
 	}
 
 	text := diagnosticsDetailText(resp.Diagnostics)
 	for _, want := range []string{"Post-apply verification failed", "vlan 10", "port 3"} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("role-mismatch drift error should mention %q, got: %q", want, text)
+			t.Fatalf("membership-drop drift error should mention %q, got: %q", want, text)
 		}
 	}
 }
@@ -522,12 +525,14 @@ func acceptanceNSDPProviderData(t *testing.T) *providerData {
 // TestAccVLANStateNSDPResource is the NSDP 802.1Q write acceptance
 // skeleton.
 //
-// ⚠️ DO NOT RUN until the nsdp-gaps.sh GAP-1/GAP-2 live verdicts are
-// recorded — the extra NETGEAR_PLUS_ACC_8021Q_NSDP=1 gate exists for
-// exactly that. GAP-1 (0x2800 tagged/untagged role order) is
-// load-bearing here: a wrong role assumption produces a verification
-// drift error, not silent corruption, but a clean run still proves
-// nothing until the verdict is in.
+// ⚠️ The extra NETGEAR_PLUS_ACC_8021Q_NSDP=1 gate stays in place until
+// the corrected 0x2800 write path (ROUND 19 member/tagged payload,
+// 2026-09-12) is proven on hardware in a full acceptance run. GAP-1 is
+// RESOLVED (member/tagged wire model; untagged derived) and
+// SetPVID/Delete8021QVLAN are live-proven — the remaining unknown is
+// end-to-end convergence, and the verify-corrective spine turns any
+// residual write-path surprise into a typed drift error, not silent
+// corruption.
 //
 // Sacrificial discipline, identical to nsdp-gaps.sh: VLAN 999 and free
 // ports 3/5 ONLY; the PVID change is on port 3 ONLY; ports 1, 2, and 8
@@ -538,7 +543,7 @@ func TestAccVLANStateNSDPResource(t *testing.T) {
 		t.Skip("TF_ACC not set: skipping NSDP hardware acceptance test")
 	}
 	if os.Getenv("NETGEAR_PLUS_ACC_8021Q_NSDP") != "1" {
-		t.Skip("NETGEAR_PLUS_ACC_8021Q_NSDP != 1: 802.1Q NSDP writes stay gated until the GAP-1/GAP-2 live verdicts are recorded")
+		t.Skip("NETGEAR_PLUS_ACC_8021Q_NSDP != 1: 802.1Q NSDP writes stay gated until the corrected ROUND 19 write path passes a full hardware acceptance run")
 	}
 
 	data := acceptanceNSDPProviderData(t)

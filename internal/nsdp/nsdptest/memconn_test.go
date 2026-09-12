@@ -146,7 +146,7 @@ func TestFakeAgentProtocolInMemory(t *testing.T) {
 	assertSilentNoOpScenario(t, agent, c)
 	assertVLANTables(t, agent, c)
 	assert8021QRoundTrip(t, agent, c)
-	assertRoleMismatchVisibility(t, agent, c)
+	assertMembershipDropVisibility(t, agent, c)
 	assertIdentity(t, agent, c, nsdp.SwitchIdentity{
 		ProductName:     "GS108Ev3",
 		ModelCode:       0x0100,

@@ -92,16 +92,16 @@ type Options struct {
 	SerialNumber string
 }
 
-// VLAN8021QEntry is one stored 802.1Q table entry: the verbatim 4-byte
-// SET value {vlan u16 BE, byte2, byte3} with byte roles assigned per the
-// library's ProSafeLinux-derived assumption (nsdp.Client.Set8021QVLAN
-// sends byte2 = tagged bitmap, byte3 = untagged bitmap — the GAP-1
-// write-order note on Set8021QVLAN applies here too; the
-// Reply8021QRolesSwapped knob can report the roles back swapped).
+// VLAN8021QEntry is one stored 802.1Q table entry, held as the LOGICAL
+// per-VLAN tagged/untagged port sets. The wire is synthesized under the
+// ROUND 19 member/tagged model (replyBlockGet: byte2 = Tagged|Untagged
+// = members, byte3 = Tagged), and SET values are parsed back into the
+// logical form exactly like nsdp.decode8021QEntry (untagged = member
+// AND NOT tagged).
 type VLAN8021QEntry struct {
 	VLANID   uint16
-	Tagged   byte // SET byte2 under the library's tagged-first assumption
-	Untagged byte // SET byte3
+	Tagged   byte // logical TAGGED set (wire byte3 masked into byte2)
+	Untagged byte // logical UNTAGGED set (derived: member AND NOT tagged)
 }
 
 // FakeAgent is a scripted NSDP v2 switch: a UDP listener on a loopback
@@ -120,22 +120,23 @@ type VLAN8021QEntry struct {
 //	    apply it — the silent no-op quirk.
 //	AuthFail: reject the login/auth token with the auth-mismatch
 //	    reply (status 0x0d) to simulate an authentication failure.
-//	Reply8021QRolesSwapped: encode 0x2800 block replies with
-//	    byte2/byte3 SWAPPED relative to what SETs applied — the GAP-1
-//	    adversarial world where the library's byte2=tagged read
-//	    assumption is backwards. Writes still land as the library
-//	    intends (the SET handler applies byte2 = Tagged), so any
-//	    disagreement a client observes between what it wrote and what
-//	    Get8021QVLANs reports is purely the reply encoder's doing —
-//	    the mismatch is observable at the library boundary by design.
+//	Reply8021QMembershipDropped: when set, a 0x2800 SET replies OK but
+//	    the VLAN is stored with EMPTY membership — replaying the REAL
+//	    firmware behavior observed on the casalta GS108Ev3 (ROUND 19,
+//	    2026-09-12: a SET whose tagged bits are not a subset of its
+//	    member bits is silently dropped, membership and all, reply OK).
+//	    Reads then disagree with the write by reporting the empty
+//	    membership, so the drop is observable at the library boundary
+//	    by design — the provider's verify-corrective layer converts
+//	    it into a typed drift error, never silent success.
 //
 // All remaining state is guarded by an internal mutex; the exported
 // getters are goroutine-safe and return copies.
 type FakeAgent struct {
-	DropSetReplies         bool
-	IgnoreSets             bool
-	AuthFail               bool
-	Reply8021QRolesSwapped bool
+	DropSetReplies              bool
+	IgnoreSets                  bool
+	AuthFail                    bool
+	Reply8021QMembershipDropped bool
 
 	mu       sync.Mutex
 	conn     net.PacketConn
@@ -465,16 +466,12 @@ func (a *FakeAgent) replyBlockGet(req []byte, addr net.Addr, blockID byte) {
 		}
 	case nsdp.Tag8021QVLAN:
 		for _, e := range a.vlan8021Q {
-			// Default: mirror the stored (SET-applied) roles. With the
-			// Reply8021QRolesSwapped knob, byte2/byte3 come back
-			// EXCHANGED — the adversarial GAP-1 world where the
-			// library's byte2=tagged read assumption is backwards.
-			b2, b3 := e.Tagged, e.Untagged
-			if a.Reply8021QRolesSwapped {
-				b2, b3 = e.Untagged, e.Tagged
-			}
+			// Synthesize the wire under the ROUND 19 member/tagged
+			// model from the logical per-VLAN sets: byte2 = MEMBER
+			// superset (tagged|untagged), byte3 = TAGGED subset —
+			// untagged is derived on the reader's side, never sent.
 			tlvs = append(tlvs, nsdp.TLV{Tag: tag, Value: []byte{
-				byte(e.VLANID >> 8), byte(e.VLANID), b2, b3,
+				byte(e.VLANID >> 8), byte(e.VLANID), e.Tagged | e.Untagged, e.Tagged,
 			}})
 		}
 	case nsdp.TagSerialNumber:
@@ -625,21 +622,32 @@ func (a *FakeAgent) applyTLV(t nsdp.TLV) error {
 		a.portVLANs = append(a.portVLANs, nsdp.PortBasedVLANEntry{VLANID: id, Ports: v[2]})
 		return nil
 	case nsdp.Tag8021QVLAN:
-		// GAP-1 assumption, mirroring the real Set8021QVLAN payload
-		// order: byte2 = TAGGED bitmap, byte3 = UNTAGGED bitmap. Stored
-		// verbatim keyed by VLAN id; the Reply8021QRolesSwapped knob
-		// can then report the roles back swapped.
+		// ROUND 19 wire model: {vlan_id u16 BE, MEMBER bitmap, TAGGED
+		// bitmap}. The value is parsed into the LOGICAL Tagged/Untagged
+		// sets exactly like nsdp.decode8021QEntry (tagged = byte3
+		// masked into byte2, untagged = member AND NOT tagged). The
+		// Reply8021QMembershipDropped knob replays the live-observed
+		// firmware behavior (casalta, 2026-09-12): reply OK but store
+		// the VLAN with EMPTY membership.
 		if len(v) != 4 {
-			return fmt.Errorf("0x%04x: want 4 bytes {vlan_id u16 BE, tagged, untagged}, got %d", t.Tag, len(v))
+			return fmt.Errorf("0x%04x: want 4 bytes {vlan_id u16 BE, member, tagged}, got %d", t.Tag, len(v))
 		}
 		id := binary.BigEndian.Uint16(v[0:2])
+		entry := VLAN8021QEntry{
+			VLANID:   id,
+			Tagged:   v[3] & v[2],
+			Untagged: v[2] &^ v[3],
+		}
+		if a.Reply8021QMembershipDropped {
+			entry.Tagged, entry.Untagged = 0, 0
+		}
 		for i := range a.vlan8021Q {
 			if a.vlan8021Q[i].VLANID == id {
-				a.vlan8021Q[i].Tagged, a.vlan8021Q[i].Untagged = v[2], v[3]
+				a.vlan8021Q[i] = entry
 				return nil
 			}
 		}
-		a.vlan8021Q = append(a.vlan8021Q, VLAN8021QEntry{VLANID: id, Tagged: v[2], Untagged: v[3]})
+		a.vlan8021Q = append(a.vlan8021Q, entry)
 		return nil
 	case nsdp.TagDelete8021QVLAN:
 		if len(v) != 2 {
@@ -792,9 +800,10 @@ func (a *FakeAgent) PortBasedVLANs() []nsdp.PortBasedVLANEntry {
 	return append([]nsdp.PortBasedVLANEntry(nil), a.portVLANs...)
 }
 
-// VLAN8021Q returns a copy of the stored 802.1Q table entries (0x2800),
-// each {vlan, Tagged, Untagged} exactly as the SET path applied them
-// (byte2 = Tagged under the library's tagged-first assumption).
+// VLAN8021Q returns a copy of the stored 802.1Q table entries (0x2800)
+// as the LOGICAL per-VLAN Tagged/Untagged sets — what the SET path
+// applied, parsed under the ROUND 19 member/tagged wire model (the
+// Reply8021QMembershipDropped knob stores empty sets instead).
 func (a *FakeAgent) VLAN8021Q() []VLAN8021QEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()

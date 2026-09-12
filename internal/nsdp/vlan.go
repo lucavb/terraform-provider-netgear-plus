@@ -8,12 +8,9 @@ import (
 // VLAN8021QMembership is one 802.1Q VLAN table entry (block 0x28, tag
 // 0x2800): the VLAN ID plus its tagged and untagged port sets, carried as
 // port bitmaps in the live-proven PortBitmap bit order — port N sets bit
-// 1<<(8-N) (port 1 = 0x80 … port 8 = 0x01).
-//
-// GAP-1 PENDING: which of the two reply bytes carries the TAGGED set is
-// not yet proven on live hardware. The role interpretation lives in
-// exactly one place — decode8021QEntry below — whose comment block holds
-// the pending-verdict swap procedure.
+// 1<<(8-N) (port 1 = 0x80 … port 8 = 0x01). Tagged/Untagged are the
+// LOGICAL view: on the wire the entry carries MEMBER and TAGGED bitmaps
+// and untagged is derived (see decode8021QEntry, resolved ROUND 19).
 type VLAN8021QMembership struct {
 	VLANID   uint16
 	Tagged   uint8 // port bitmap: tagged member ports
@@ -50,42 +47,43 @@ func PortsFromBitmap(b uint8) []int {
 	return ports
 }
 
-// decode8021QEntry assigns roles to one 4-byte 0x2800 reply entry
-// {vlan_id u16 BE, byte2, byte3}.
+// decode8021QEntry decodes one 4-byte 0x2800 reply entry
+// {vlan_id u16 BE, MEMBER bitmap u8, TAGGED bitmap u8}.
 //
 // ───────────────────────────────────────────────────────────────────────
-// GAP-1 PENDING — role interpretation unproven on live hardware.
+// GAP-1 RESOLVED (ROUND 19 — casalta live probe, 2026-09-12,
+// gaps-20260912-163538.log). The entry is NOT {vlan, tagged, untagged}:
+// byte2 is the MEMBER superset, byte3 the TAGGED subset, and untagged is
+// DERIVED (member AND NOT tagged), never carried on the wire.
 //
-// The nsdp-gaps.sh stage-2 probe decides this (asymmetric VLAN 999:
-// port 3 TAGGED, port 5 UNTAGGED, with a web-UI confirm cross-check;
-// the interpretation matrix lives in the script and its log). One-line
-// swap procedure per verdict branch:
+// Live evidence, zero contradictions across all six production VLANs:
+// the derived untagged set equals exactly the ports whose PVID is that
+// VLAN (V1 untagged {1,2,3,6,7,8} = the PVID-1 ports; V10 untagged {5}
+// = the PVID-10 port; V1001 untagged {4}; V5/V1000 0xFFFF = pure tagged
+// leftovers — every port in both bytes, impossible under the old
+// two-bitmap reading; V4094 members {1,2,8} tagged {1,2,8} = pure
+// trunk). The old tagged/untagged payload was falsified on the wire:
+// our stage-2 SET {03 e7 20 08} read as members {3}, tagged {5} —
+// tagged NOT a subset of members — and the firmware silently dropped
+// the whole membership, storing VLAN 999 empty with a OK reply.
 //
-//	ROLE A = tagged   (UI y) → keep as-is (byte2 = Tagged). No change.
-//	ROLE A = untagged (UI y) → swap EXACTLY HERE, one line:
-//	        Tagged: byte3, Untagged: byte2.
-//	        (The write path is correct — only the read parser swaps.)
-//	ROLE A = untagged (UI n) → swap HERE *and* the payload build in
-//	        Set8021QVLAN (methods.go): the switch stores byte2 =
-//	        UNTAGGED in BOTH directions, so the write order swaps too.
-//	ROLE A = tagged   (UI n) → contradictory; re-probe, change nothing.
-//
-// Default assumption (current, ProSafeLinux-derived, matching
-// Set8021QVLAN's payload order): byte2 = TAGGED, byte3 = UNTAGGED.
-// This helper is the ONLY place reads assign roles — swap here and the
-// whole library surface (Get8021QVLANs, the provider's vlan_state)
-// follows. TestDecode8021QEntryDefaultRoles pins the default and must be
-// updated together with any swap.
-// ───────────────────────────────────────────────────────────────────────
-func decode8021QEntry(vlanID uint16, byte2, byte3 byte) VLAN8021QMembership {
-	return VLAN8021QMembership{VLANID: vlanID, Tagged: byte2, Untagged: byte3}
+// Production always carries tagged ⊆ member; byte3 is masked into
+// byte2 anyway for safety, so a malformed entry can never report a
+// tagged port outside the member set.
+// ───────────────────────────────────────────────────────────────────
+func decode8021QEntry(vlanID uint16, member, tagged byte) VLAN8021QMembership {
+	return VLAN8021QMembership{
+		VLANID:   vlanID,
+		Tagged:   tagged & member,
+		Untagged: member &^ tagged,
+	}
 }
 
 // Get8021QVLANs reads the full 802.1Q VLAN table (block 0x28) and decodes
-// every entry through decode8021QEntry — the GAP-1 role seam. Live replies
-// carry one 4-byte TLV per VLAN {vlan_id u16 BE, byte2, byte3}; the walk
-// also tolerates several concatenated entries per TLV, like the other nsdp
-// table decoders.
+// every entry through decode8021QEntry — the ROUND 19 member/tagged
+// model. Live replies carry one 4-byte TLV per VLAN {vlan_id u16 BE,
+// member bitmap, tagged bitmap}; the walk also tolerates several
+// concatenated entries per TLV, like the other nsdp table decoders.
 func (c *Client) Get8021QVLANs() ([]VLAN8021QMembership, error) {
 	attrs, err := c.GetBlock(0x28, nil)
 	if err != nil {
@@ -98,7 +96,7 @@ func (c *Client) Get8021QVLANs() ([]VLAN8021QMembership, error) {
 		}
 		v := a.Value
 		if len(v) == 0 || len(v)%4 != 0 {
-			return nil, fmt.Errorf("nsdp: 0x%04x value length %d not a positive multiple of 4 for {vlan_id u16 BE, byte2, byte3}", a.Tag, len(v))
+			return nil, fmt.Errorf("nsdp: 0x%04x value length %d not a positive multiple of 4 for {vlan_id u16 BE, member, tagged}", a.Tag, len(v))
 		}
 		for off := 0; off+4 <= len(v); off += 4 {
 			out = append(out, decode8021QEntry(
