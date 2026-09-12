@@ -1,6 +1,7 @@
 package gs108ev3
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // Device protocol requires MD5.
 	"encoding/hex"
@@ -16,28 +17,32 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
+	"github.com/lucavb/terraform-provider-netgear-plus/internal/cfg"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/model"
 )
 
 const (
-	defaultTimeout        = 15 * time.Second
-	portCount             = 8
-	endpointLoginHTM      = "/login.htm"
-	endpointLoginCGI      = "/login.cgi"
-	endpointLogoutCGI     = "/logout.cgi"
-	endpointSwitchInfoHTM = "/switch_info.htm"
-	endpointSwitchInfoCGI = "/switch_info.cgi"
-	endpointVLANConfigHTM = "/8021qCf.htm"
-	endpointVLANConfigCGI = "/8021qCf.cgi"
-	endpointVLANMemberHTM = "/8021qMembe.htm"
-	endpointVLANMemberCGI = "/8021qMembe.cgi"
-	endpointPortPVIDHTM   = "/portPVID.htm"
-	endpointPortPVIDCGI   = "/portPVID.cgi"
+	defaultTimeout             = 15 * time.Second
+	portCount                  = 8
+	maxConsecutiveAuthFailures = 3
+	endpointLoginHTM           = "/login.htm"
+	endpointLoginCGI           = "/login.cgi"
+	endpointLogoutCGI          = "/logout.cgi"
+	endpointSwitchInfoHTM      = "/switch_info.htm"
+	endpointSwitchInfoCGI      = "/switch_info.cgi"
+	endpointVLANConfigHTM      = "/8021qCf.htm"
+	endpointVLANConfigCGI      = "/8021qCf.cgi"
+	endpointVLANMemberHTM      = "/8021qMembe.htm"
+	endpointVLANMemberCGI      = "/8021qMembe.cgi"
+	endpointPortPVIDHTM        = "/portPVID.htm"
+	endpointPortPVIDCGI        = "/portPVID.cgi"
+	endpointConfigData         = "/config_data.bin"
 )
 
 var (
 	errAuthenticationFailed = errors.New("authentication failed")
 	errSwitchLocked         = errors.New("switch temporarily locked")
+	errAuthFailureLimit     = errors.New("consecutive login failure limit reached")
 	requestPacers           sync.Map
 )
 
@@ -54,6 +59,9 @@ type Driver struct {
 	host           string
 	hash           string
 	requestSpacing time.Duration
+
+	authMu                  sync.Mutex
+	consecutiveAuthFailures int
 }
 
 // New constructs a GS108Ev3 driver.
@@ -95,7 +103,18 @@ func New(host, password string, timeoutSeconds int64, requestSpacing time.Durati
 }
 
 // Login authenticates and caches the current session hash.
+//
+// The switch enforces a global login lockout after repeated failed logins,
+// so the driver tracks consecutive failures and short-circuits further
+// attempts once maxConsecutiveAuthFailures is reached. errAuthFailureLimit
+// is deliberately not treated as session-invalidating so that provider
+// retries reuse the same driver (and counter) instead of looping fresh
+// re-logins against the switch.
 func (d *Driver) Login(ctx context.Context) error {
+	if err := d.guardAuthFailureLimit(); err != nil {
+		return err
+	}
+
 	loginPage, err := d.tryGET(ctx, endpointLoginHTM, endpointLoginCGI)
 	if err != nil {
 		return fmt.Errorf("load login page: %w", err)
@@ -115,18 +134,51 @@ func (d *Driver) Login(ctx context.Context) error {
 	}
 
 	if errMsg := parseErrorMessage(body); errMsg != "" {
+		d.recordAuthFailure()
 		return loginFailureError(d.host, errMsg)
 	}
 
 	if !strings.Contains(body, `top.location.href = "index.htm";`) {
+		d.recordAuthFailure()
 		return fmt.Errorf("%w: login failed: expected redirect script", errAuthenticationFailed)
 	}
+
+	d.resetAuthFailures()
 
 	if _, err := d.refreshHash(ctx); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// guardAuthFailureLimit short-circuits a login attempt before it reaches the
+// switch once the consecutive-failure limit is hit.
+func (d *Driver) guardAuthFailureLimit() error {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+
+	if d.consecutiveAuthFailures < maxConsecutiveAuthFailures {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: aborting further login attempts for %s to avoid the switch's global login lockout: check the configured credentials; the failure counter resets in a fresh provider run",
+		errAuthFailureLimit,
+		d.host,
+	)
+}
+
+func (d *Driver) recordAuthFailure() {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	d.consecutiveAuthFailures++
+}
+
+func (d *Driver) resetAuthFailures() {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	d.consecutiveAuthFailures = 0
 }
 
 func loginFailureError(host, errMsg string) error {
@@ -228,6 +280,22 @@ func (d *Driver) ReadVLANState(ctx context.Context) (model.VLANState, error) {
 	state.PVIDs = pvids
 
 	return state.Normalize(), nil
+}
+
+// ReadConfig fetches and parses the full-configuration backup served by the
+// switch. Auth is cookie-based (GS108SID) with no form parameters.
+func (d *Driver) ReadConfig(ctx context.Context) (*cfg.Config, error) {
+	body, err := d.getRaw(ctx, endpointConfigData, true)
+	if err != nil {
+		return nil, fmt.Errorf("read config backup: %w", err)
+	}
+
+	config, err := cfg.ParseConfig([]byte(body))
+	if err != nil {
+		return nil, fmt.Errorf("%w: the endpoint may have returned an HTML page instead of the binary config backup", err)
+	}
+
+	return config, nil
 }
 
 func (d *Driver) readSwitchInfoPage(ctx context.Context) (string, error) {
@@ -375,6 +443,37 @@ func (d *Driver) postFormAuthenticated(ctx context.Context, endpoint string, for
 		return "", err
 	}
 	return d.postFormRaw(ctx, endpoint, form, true)
+}
+
+// postBodyRaw posts a pre-built request body with an explicit content type.
+// It applies the per-host request pacer like the other request paths.
+func (d *Driver) postBodyRaw(ctx context.Context, endpoint, contentType string, body []byte) (string, error) {
+	if err := d.waitRequestSpacing(ctx); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.resolveURL(endpoint), bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("perform request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("unexpected status %d from %s", resp.StatusCode, endpoint)
+	}
+
+	return string(bodyBytes), nil
 }
 
 func (d *Driver) resolveURL(endpoint string) string {

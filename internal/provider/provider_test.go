@@ -9,6 +9,7 @@ import (
 
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 
+	"github.com/lucavb/terraform-provider-netgear-plus/internal/cfg"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/client"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/model"
 )
@@ -17,6 +18,8 @@ type stubDriver struct {
 	readSwitchFacts         func(context.Context) (model.SwitchFacts, error)
 	readVLANState           func(context.Context) (model.VLANState, error)
 	applyVLANState          func(context.Context, model.VLANState) error
+	readConfig              func(context.Context) (*cfg.Config, error)
+	restoreConfigAndWait    func(context.Context, []byte, time.Duration) error
 	logout                  func(context.Context) error
 	shouldInvalidateSession func(error) bool
 }
@@ -49,6 +52,20 @@ func (d *stubDriver) ReadVLANState(ctx context.Context) (model.VLANState, error)
 func (d *stubDriver) ApplyVLANState(ctx context.Context, state model.VLANState) error {
 	if d.applyVLANState != nil {
 		return d.applyVLANState(ctx, state)
+	}
+	return nil
+}
+
+func (d *stubDriver) ReadConfig(ctx context.Context) (*cfg.Config, error) {
+	if d.readConfig != nil {
+		return d.readConfig(ctx)
+	}
+	return nil, nil
+}
+
+func (d *stubDriver) RestoreConfigAndWait(ctx context.Context, cfgBytes []byte, timeout time.Duration) error {
+	if d.restoreConfigAndWait != nil {
+		return d.restoreConfigAndWait(ctx, cfgBytes, timeout)
 	}
 	return nil
 }
