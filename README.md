@@ -83,6 +83,16 @@ resource "netgear_plus_vlan_state" "switch" {
 
 Configure VLAN membership with repeated `vlan {}` blocks. If you generate configuration, use `dynamic "vlan"` to emit those blocks rather than assigning `vlan = [...]`.
 
+## Import from a Config Backup
+
+`cmd/cfg2tf` converts an FMv2 binary backup (such as the checked-in `GS108Ev3.cfg`) into a `.tf` file for `netgear_plus_vlan_state`, including a config-driven `import` block so `terraform plan` adopts the switch state in one step:
+
+```sh
+go run ./cmd/cfg2tf GS108Ev3.cfg
+```
+
+The host defaults to the IP stored in the backup's `ethconfig` section; pass `-host` to override. Use `-out FILE` to write a file instead of stdout; `-serial` pins the expected serial number instead of referencing the switch data source, and `-skip-import` drops the import block. The tool refuses states that fail validation unless `-force` is given.
+
 ## Safe First Use
 
 Start in read-only mode first:
