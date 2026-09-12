@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/client"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/model"
+	"github.com/lucavb/terraform-provider-netgear-plus/internal/nsdp"
 )
 
 var hostMutexes sync.Map
@@ -27,10 +29,16 @@ var hostOperationPacers sync.Map
 
 const defaultRequestSpacing = 5 * time.Second
 
+// agentMACPattern matches a colon-separated MAC address as the NSDP
+// agent_mac attribute accepts it (e.g. 8c:3b:ad:25:1b:88).
+var agentMACPattern = regexp.MustCompile(`^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$`)
+
 type netgearPlusProvider struct{}
 
 type providerModel struct {
 	Host           types.String `tfsdk:"host"`
+	AgentMAC       types.String `tfsdk:"agent_mac"`
+	IfaceName      types.String `tfsdk:"interface"`
 	Password       types.String `tfsdk:"password"`
 	Model          types.String `tfsdk:"model"`
 	RequestTimeout types.Int64  `tfsdk:"request_timeout"`
@@ -42,6 +50,14 @@ type providerData struct {
 	config        client.Config
 	driverFactory func(client.Config) (client.Driver, error)
 	cachedSession *cachedDriverSession
+
+	// NSDP plumbing (see nsdp_client.go). The NSDP client lifecycle is
+	// independent of the HTTP driver session above.
+	agentMAC    string // normalized (trimmed, lowercased) switch MAC; "" = unset
+	ifaceName   string // NSDP broadcast interface name; "" = nsdp package default
+	deviceKey   string // unified mutex/pacer key, precomputed at Configure time
+	nsdpFactory func(nsdp.Options) (nsdpClient, error)
+	cachedNSDP  *cachedNSDPClient
 }
 
 type cachedDriverSession struct {
@@ -89,13 +105,24 @@ func (p *netgearPlusProvider) Schema(_ context.Context, _ provider.SchemaRequest
 	resp.Schema = pschema.Schema{
 		Attributes: map[string]pschema.Attribute{
 			"host": pschema.StringAttribute{
-				Required:    true,
-				Description: "Switch hostname or URL.",
+				Optional:    true,
+				Description: "Switch hostname or URL. Required by web UI (HTTP) resources and data sources; may be omitted when only NSDP (`agent_mac`) resources are used. At least one of `host` or `agent_mac` must be set.",
+			},
+			"agent_mac": pschema.StringAttribute{
+				Optional:    true,
+				Description: "Switch (agent) MAC address for NSDP, e.g. 8c:3b:ad:25:1b:88. Required by NSDP resources; at least one of `host` or `agent_mac` must be set.",
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(agentMACPattern, "must be a colon-separated MAC address, e.g. 8c:3b:ad:25:1b:88"),
+				},
+			},
+			"interface": pschema.StringAttribute{
+				Optional:    true,
+				Description: "Local network interface used for NSDP broadcast traffic (e.g. en0). If unset, the first non-loopback interface with a hardware address is used.",
 			},
 			"password": pschema.StringAttribute{
 				Required:    true,
 				Sensitive:   true,
-				Description: "Switch admin password.",
+				Description: "Switch admin password, shared by the web UI and NSDP.",
 			},
 			"model": pschema.StringAttribute{
 				Optional:    true,
@@ -127,15 +154,26 @@ func (p *netgearPlusProvider) Configure(ctx context.Context, req provider.Config
 		return
 	}
 
-	if data.Host.IsUnknown() || data.Password.IsUnknown() || data.Model.IsUnknown() {
+	if data.Host.IsUnknown() || data.Password.IsUnknown() || data.Model.IsUnknown() ||
+		data.AgentMAC.IsUnknown() || data.IfaceName.IsUnknown() {
 		resp.Diagnostics.AddError("Unknown provider configuration", "Provider configuration contains unknown values.")
 		return
 	}
 
 	host := strings.TrimSpace(data.Host.ValueString())
-	if host == "" {
-		resp.Diagnostics.AddError("Invalid host", "`host` must not be empty.")
+	agentMAC := normalizeAgentMAC(data.AgentMAC.ValueString())
+	ifaceName := strings.TrimSpace(data.IfaceName.ValueString())
+
+	if host == "" && agentMAC == "" {
+		resp.Diagnostics.AddError("Missing device address", "At least one of `host` or `agent_mac` must be set: `host` targets the switch web UI (HTTP driver), `agent_mac` targets the switch over NSDP.")
 		return
+	}
+
+	if agentMAC != "" {
+		if !agentMACPattern.MatchString(agentMAC) {
+			resp.Diagnostics.AddError("Invalid agent_mac", "`agent_mac` must be a colon-separated MAC address (e.g. 8c:3b:ad:25:1b:88).")
+			return
+		}
 	}
 
 	modelName := data.Model.ValueString()
@@ -162,7 +200,7 @@ func (p *netgearPlusProvider) Configure(ctx context.Context, req provider.Config
 		insecureHTTP = data.InsecureHTTP.ValueBool()
 	}
 
-	if !insecureHTTP {
+	if host != "" && !insecureHTTP {
 		if !strings.HasPrefix(host, "https://") {
 			resp.Diagnostics.AddError("Unsupported transport", "v0.1.0 only supports plaintext HTTP for GS108Ev3. Set `insecure_http = true` or provide an `https://` host if your device supports it.")
 			return
@@ -178,10 +216,23 @@ func (p *netgearPlusProvider) Configure(ctx context.Context, req provider.Config
 		RequestSpacing: time.Duration(requestSpacing) * time.Second,
 	}
 
-	providerData := &providerData{
-		config:        config,
-		driverFactory: client.NewDriver,
+	// ONE device key for the mutex/pacer: the normalized agent MAC when
+	// set, else the canonical host key. HTTP and NSDP operations against
+	// the same physical switch therefore serialize against each other.
+	// The HTTP resource ID (gs108ev3@host) deliberately stays keyed by
+	// host only — state identity must not change.
+	deviceKey := agentMAC
+	if deviceKey == "" {
+		deviceKey = canonicalHostKey(host)
 	}
+
+	providerData := &providerData{
+		config:    config,
+		agentMAC:  agentMAC,
+		ifaceName: ifaceName,
+		deviceKey: deviceKey,
+	}
+	providerData.driverFactory = client.NewDriver
 	resp.DataSourceData = providerData
 	resp.ResourceData = providerData
 }
@@ -189,6 +240,9 @@ func (p *netgearPlusProvider) Configure(ctx context.Context, req provider.Config
 func (p *netgearPlusProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewVLANStateResource,
+		NewPortConfigResource,
+		NewSwitchSettingsResource,
+		NewPortBasedVLANResource,
 	}
 }
 
@@ -204,11 +258,16 @@ func withDriverForHost(ctx context.Context, data *providerData, fn func(client.D
 		return fmt.Errorf("provider is not configured")
 	}
 
-	mutex := mutexForHost(data.config.Host)
+	if strings.TrimSpace(data.config.Host) == "" {
+		return fmt.Errorf("HTTP resources require the provider attribute host")
+	}
+
+	key := data.deviceLockKey()
+	mutex := mutexForDevice(key)
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	if err := waitForHostOperation(ctx, data.config.Host, data.config.RequestSpacing); err != nil {
+	if err := waitForDeviceOperation(ctx, key, data.config.RequestSpacing); err != nil {
 		return err
 	}
 
@@ -325,17 +384,35 @@ func addDriverError(diags diagnosticAdder, err error) {
 	diags.AddError("Create driver failed", err.Error())
 }
 
-func mutexForHost(host string) *sync.Mutex {
-	mutexValue, _ := hostMutexes.LoadOrStore(canonicalHostKey(host), &sync.Mutex{})
+// deviceLockKey returns the single key that serializes all operations
+// (HTTP and NSDP) against one physical switch: the normalized agent MAC
+// when set, else the canonical host key. Configure precomputes it; the
+// fallbacks keep manually constructed providerData values (tests) keyed
+// the same way.
+func (d *providerData) deviceLockKey() string {
+	if d == nil {
+		return ""
+	}
+	if d.deviceKey != "" {
+		return d.deviceKey
+	}
+	if d.agentMAC != "" {
+		return d.agentMAC
+	}
+	return canonicalHostKey(d.config.Host)
+}
+
+func mutexForDevice(key string) *sync.Mutex {
+	mutexValue, _ := hostMutexes.LoadOrStore(key, &sync.Mutex{})
 	return mutexValue.(*sync.Mutex)
 }
 
-func waitForHostOperation(ctx context.Context, host string, spacing time.Duration) error {
+func waitForDeviceOperation(ctx context.Context, key string, spacing time.Duration) error {
 	if spacing <= 0 {
 		return nil
 	}
 
-	pacerValue, _ := hostOperationPacers.LoadOrStore(canonicalHostKey(host), &hostOperationPacer{})
+	pacerValue, _ := hostOperationPacers.LoadOrStore(key, &hostOperationPacer{})
 	pacer := pacerValue.(*hostOperationPacer)
 
 	pacer.mu.Lock()
