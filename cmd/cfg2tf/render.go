@@ -112,7 +112,7 @@ func renderHCL(state model.VLANState, fingerprint string, opts options) string {
 
 	b.WriteString("terraform {\n")
 	b.WriteString("  required_providers {\n")
-	b.WriteString("    netgear_plus = {\n")
+	b.WriteString("    netgear = {\n")
 	b.WriteString("      source = \"lucavb/netgear-plus\"\n")
 	b.WriteString("    }\n")
 	b.WriteString("  }\n")
@@ -125,7 +125,7 @@ func renderHCL(state model.VLANState, fingerprint string, opts options) string {
 	b.WriteString("}\n")
 	b.WriteString("\n")
 
-	b.WriteString("provider \"netgear_plus\" {\n")
+	b.WriteString("provider \"netgear\" {\n")
 	fmt.Fprintf(&b, "  host     = %s\n", quoteHCL(opts.Host))
 	b.WriteString("  password = var.switch_password\n")
 	fmt.Fprintf(&b, "  model    = %s\n", quoteHCL(opts.Model))

@@ -144,8 +144,8 @@ func TestDriverReadConfig(t *testing.T) {
 	if !slices.Equal(vlans[0].Members, []int{1, 2, 3, 4, 5, 6, 7, 8}) {
 		t.Fatalf("vlan 10 members = %v", vlans[0].Members)
 	}
-	if !slices.Equal(vlans[0].Tagged, []int{5}) {
-		t.Fatalf("vlan 10 tagged = %v, want [5]", vlans[0].Tagged)
+	if !slices.Equal(vlans[0].Tagged, []int{1, 2, 3, 4, 6, 7, 8}) {
+		t.Fatalf("vlan 10 tagged = %v, want [1 2 3 4 6 7 8]", vlans[0].Tagged)
 	}
 }
 

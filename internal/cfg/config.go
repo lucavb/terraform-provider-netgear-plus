@@ -236,8 +236,8 @@ type VLAN struct {
 
 // VLANs decodes the vlan section: uint16 LE mode, uint16 LE count, then
 // count entries of (uint16 LE vid, uint16 LE mask). In each mask the low
-// byte is the member port bitmap and the high byte the untagged port bitmap
-// (bit n = port n+1). Tagged ports are members that are not untagged.
+// byte is the member port bitmap and the high byte the tagged port bitmap
+// (bit n = port n+1). Untagged ports are members that are not tagged.
 // The firmware pads the section past the count entries (a real backup
 // carries 132 bytes of data for 6 entries); trailing bytes are tolerated
 // and preserved in Section.Data/Raw.
@@ -264,17 +264,17 @@ func (c *Config) VLANs() ([]VLAN, error) {
 		mask := binary.LittleEndian.Uint16(data[offset+2:])
 
 		members := portsFromBitmap(byte(mask))
-		untagged := portsFromBitmap(byte(mask >> 8))
+		tagged := portsFromBitmap(byte(mask >> 8))
 
-		untaggedSet := make(map[int]struct{}, len(untagged))
-		for _, port := range untagged {
-			untaggedSet[port] = struct{}{}
+		taggedSet := make(map[int]struct{}, len(tagged))
+		for _, port := range tagged {
+			taggedSet[port] = struct{}{}
 		}
 
-		tagged := make([]int, 0, len(members))
+		untagged := make([]int, 0, len(members))
 		for _, port := range members {
-			if _, ok := untaggedSet[port]; !ok {
-				tagged = append(tagged, port)
+			if _, ok := taggedSet[port]; !ok {
+				untagged = append(untagged, port)
 			}
 		}
 

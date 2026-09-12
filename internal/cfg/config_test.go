@@ -288,11 +288,11 @@ func TestParseConfigHappyPathDecodes(t *testing.T) {
 	if !slices.Equal(vlans[0].Members, []int{1, 2, 3, 4, 5, 6, 7, 8}) {
 		t.Fatalf("vlan 10 members = %v", vlans[0].Members)
 	}
-	if !slices.Equal(vlans[0].Untagged, []int{1, 2, 3, 4, 6, 7, 8}) {
-		t.Fatalf("vlan 10 untagged = %v, want [1 2 3 4 6 7 8]", vlans[0].Untagged)
+	if !slices.Equal(vlans[0].Untagged, []int{5}) {
+		t.Fatalf("vlan 10 untagged = %v, want [5]", vlans[0].Untagged)
 	}
-	if !slices.Equal(vlans[0].Tagged, []int{5}) {
-		t.Fatalf("vlan 10 tagged = %v, want [5]", vlans[0].Tagged)
+	if !slices.Equal(vlans[0].Tagged, []int{1, 2, 3, 4, 6, 7, 8}) {
+		t.Fatalf("vlan 10 tagged = %v, want [1 2 3 4 6 7 8]", vlans[0].Tagged)
 	}
 
 	if got, want := vlans[1].ID, 1001; got != want {
@@ -301,11 +301,11 @@ func TestParseConfigHappyPathDecodes(t *testing.T) {
 	if !slices.Equal(vlans[1].Members, []int{1, 2, 3, 4, 5, 6, 7, 8}) {
 		t.Fatalf("vlan 1001 members = %v", vlans[1].Members)
 	}
-	if !slices.Equal(vlans[1].Untagged, []int{1, 2, 3, 5, 6, 7, 8}) {
-		t.Fatalf("vlan 1001 untagged = %v, want [1 2 3 5 6 7 8]", vlans[1].Untagged)
+	if !slices.Equal(vlans[1].Untagged, []int{4}) {
+		t.Fatalf("vlan 1001 untagged = %v, want [4]", vlans[1].Untagged)
 	}
-	if !slices.Equal(vlans[1].Tagged, []int{4}) {
-		t.Fatalf("vlan 1001 tagged = %v, want [4]", vlans[1].Tagged)
+	if !slices.Equal(vlans[1].Tagged, []int{1, 2, 3, 5, 6, 7, 8}) {
+		t.Fatalf("vlan 1001 tagged = %v, want [1 2 3 5 6 7 8]", vlans[1].Tagged)
 	}
 }
 
