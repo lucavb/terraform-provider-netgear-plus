@@ -6,8 +6,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-
-	"github.com/lucavb/terraform-provider-netgear-plus/internal/client"
 )
 
 type vlanStateDataSource struct {
@@ -66,20 +64,24 @@ func (d *vlanStateDataSource) Read(ctx context.Context, _ datasource.ReadRequest
 		return
 	}
 
-	if err := withDriverForHost(ctx, d.data, func(driver client.Driver) error {
-		dataState, err := readVLANStateDataSourceState(ctx, driver, d.data.resourceID())
+	if err := withSwitchTransport(ctx, d.data, func(transport switchTransport) error {
+		// The ID follows the transport's identity convention
+		// (gs108ev3@<host> over HTTP, nsdp@<agent MAC> over NSDP);
+		// switching transports changes the ID. See
+		// switchTransport.ResourceID.
+		dataState, err := readVLANStateDataSourceState(ctx, transport, transport.ResourceID())
 		if err != nil {
 			return err
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &dataState)...)
 		return nil
 	}); err != nil {
-		addDriverError(&resp.Diagnostics, err)
+		addNSDPOperationError(&resp.Diagnostics, err)
 	}
 }
 
-func readVLANStateDataSourceState(ctx context.Context, driver client.Driver, resourceID string) (vlanStateDataSourceModel, error) {
-	state, err := driver.ReadVLANState(ctx)
+func readVLANStateDataSourceState(ctx context.Context, transport vlanStateTransport, resourceID string) (vlanStateDataSourceModel, error) {
+	state, err := transport.ReadVLANState(ctx)
 	if err != nil {
 		return vlanStateDataSourceModel{}, operationError("Read VLAN state failed", err)
 	}

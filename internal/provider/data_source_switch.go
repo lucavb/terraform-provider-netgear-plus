@@ -6,8 +6,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-
-	"github.com/lucavb/terraform-provider-netgear-plus/internal/client"
 )
 
 type switchDataSource struct {
@@ -60,14 +58,18 @@ func (d *switchDataSource) Read(ctx context.Context, _ datasource.ReadRequest, r
 		return
 	}
 
-	if err := withDriverForHost(ctx, d.data, func(driver client.Driver) error {
-		facts, err := driver.ReadSwitchFacts(ctx)
+	if err := withSwitchTransport(ctx, d.data, func(transport switchTransport) error {
+		facts, err := transport.ReadSwitchFacts(ctx)
 		if err != nil {
 			return operationError("Read switch facts failed", err)
 		}
 
+		// The ID follows the transport's identity convention
+		// (gs108ev3@<host> over HTTP, nsdp@<agent MAC> over NSDP);
+		// switching transports changes the ID. See
+		// switchTransport.ResourceID.
 		state := switchDataSourceModel{
-			ID:                types.StringValue(facts.ResourceID()),
+			ID:                types.StringValue(transport.ResourceID()),
 			Model:             types.StringValue(facts.Model),
 			SwitchName:        types.StringValue(facts.SwitchName),
 			SerialNumber:      types.StringValue(facts.SerialNumber),
@@ -79,6 +81,6 @@ func (d *switchDataSource) Read(ctx context.Context, _ datasource.ReadRequest, r
 		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 		return nil
 	}); err != nil {
-		addDriverError(&resp.Diagnostics, err)
+		addNSDPOperationError(&resp.Diagnostics, err)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/lucavb/terraform-provider-netgear-plus/internal/client"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/model"
 )
 
@@ -113,8 +112,8 @@ func (r *vlanStateResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
-	if err := withDriverForHost(ctx, r.data, func(driver client.Driver) error {
-		facts, err := driver.ReadSwitchFacts(ctx)
+	if err := withSwitchTransport(ctx, r.data, func(transport switchTransport) error {
+		facts, err := transport.ReadSwitchFacts(ctx)
 		if err != nil {
 			return operationError("Read switch facts failed", err)
 		}
@@ -123,7 +122,7 @@ func (r *vlanStateResource) Read(ctx context.Context, req resource.ReadRequest, 
 			return operationError("Switch identity check failed", err)
 		}
 
-		state, err := driver.ReadVLANState(ctx)
+		state, err := transport.ReadVLANState(ctx)
 		if err != nil {
 			return operationError("Read VLAN state failed", err)
 		}
@@ -133,8 +132,12 @@ func (r *vlanStateResource) Read(ctx context.Context, req resource.ReadRequest, 
 			return operationError("Flatten VLAN state failed", err)
 		}
 
+		// The state ID follows the transport's identity convention
+		// (gs108ev3@<host> over HTTP, nsdp@<agent MAC> over NSDP) —
+		// switching transports changes the ID; users must re-import
+		// rather than destroy/recreate. See switchTransport.ResourceID.
 		readState := vlanStateResourceModel{
-			ID:                   types.StringValue(facts.ResourceID()),
+			ID:                   types.StringValue(transport.ResourceID()),
 			ExpectedSerialNumber: current.ExpectedSerialNumber,
 			AllowVLANDeletions:   current.AllowVLANDeletions,
 			VLANs:                vlans,
@@ -144,7 +147,7 @@ func (r *vlanStateResource) Read(ctx context.Context, req resource.ReadRequest, 
 		resp.Diagnostics.Append(resp.State.Set(ctx, &readState)...)
 		return nil
 	}); err != nil {
-		addDriverError(&resp.Diagnostics, err)
+		addNSDPOperationError(&resp.Diagnostics, err)
 	}
 }
 
@@ -186,8 +189,8 @@ func (r *vlanStateResource) apply(ctx context.Context, plan vlanStateResourceMod
 		return
 	}
 
-	if err := withDriverForHost(ctx, r.data, func(driver client.Driver) error {
-		facts, err := driver.ReadSwitchFacts(ctx)
+	if err := withSwitchTransport(ctx, r.data, func(transport switchTransport) error {
+		facts, err := transport.ReadSwitchFacts(ctx)
 		if err != nil {
 			return operationError("Read switch facts failed", err)
 		}
@@ -199,7 +202,7 @@ func (r *vlanStateResource) apply(ctx context.Context, plan vlanStateResourceMod
 			return operationError("Switch identity check failed", err)
 		}
 
-		current, err := driver.ReadVLANState(ctx)
+		current, err := transport.ReadVLANState(ctx)
 		if err != nil {
 			return operationError("Read current VLAN state failed", err)
 		}
@@ -212,16 +215,16 @@ func (r *vlanStateResource) apply(ctx context.Context, plan vlanStateResourceMod
 			}
 		}
 
-		if err := driver.ApplyVLANState(ctx, desired); err != nil {
+		if err := transport.ApplyVLANState(ctx, desired); err != nil {
 			return operationError("Apply VLAN state failed", err)
 		}
 
-		facts, err = driver.ReadSwitchFacts(ctx)
+		facts, err = transport.ReadSwitchFacts(ctx)
 		if err != nil {
 			return operationError("Read switch facts failed", err)
 		}
 
-		verified, err := driver.ReadVLANState(ctx)
+		verified, err := transport.ReadVLANState(ctx)
 		if err != nil {
 			return operationError("Read back VLAN state failed", err)
 		}
@@ -229,7 +232,7 @@ func (r *vlanStateResource) apply(ctx context.Context, plan vlanStateResourceMod
 		if !verified.Equal(desired) {
 			return &providerOperationError{
 				summary: "Post-apply verification failed",
-				detail:  fmt.Sprintf("switch state did not converge to the requested configuration for %s: %s", facts.ResourceID(), describeStateDrift(verified, desired)),
+				detail:  fmt.Sprintf("switch state did not converge to the requested configuration for %s: %s", transport.ResourceID(), describeStateDrift(verified, desired)),
 			}
 		}
 
@@ -239,7 +242,7 @@ func (r *vlanStateResource) apply(ctx context.Context, plan vlanStateResourceMod
 		}
 
 		nextState := vlanStateResourceModel{
-			ID:                   types.StringValue(facts.ResourceID()),
+			ID:                   types.StringValue(transport.ResourceID()),
 			ExpectedSerialNumber: plan.ExpectedSerialNumber,
 			AllowVLANDeletions:   normalizedBool(plan.AllowVLANDeletions),
 			VLANs:                vlans,
@@ -249,7 +252,7 @@ func (r *vlanStateResource) apply(ctx context.Context, plan vlanStateResourceMod
 		diags.Append(target.Set(ctx, &nextState)...)
 		return nil
 	}); err != nil {
-		addDriverError(diags, err)
+		addNSDPOperationError(diags, err)
 	}
 }
 

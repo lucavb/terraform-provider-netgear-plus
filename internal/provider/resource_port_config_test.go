@@ -46,8 +46,11 @@ type fakeSwitchCall struct {
 	Blocked   bool         // SetBlockUnknownMulticast
 	MirrorDst int          // SetPortMirroring destination port (0 = disabled)
 	MirrorSrc []int        // SetPortMirroring sorted source ports
-	VLANID    int          // SetPortBasedVLAN
+	VLANID    int          // SetPortBasedVLAN / Set8021QVLAN / Delete8021QVLAN
 	VLANPorts []int        // SetPortBasedVLAN sorted ports
+	Tagged    []int        // Set8021QVLAN sorted tagged ports
+	Untagged  []int        // Set8021QVLAN sorted untagged ports
+	// SetPVID reuses Port + VLANID.
 }
 
 func (c fakeSwitchCall) String() string {
@@ -68,6 +71,12 @@ func (c fakeSwitchCall) String() string {
 		return fmt.Sprintf("SetPortMirroring(dst=%d, src=%v)", c.MirrorDst, c.MirrorSrc)
 	case "SetPortBasedVLAN":
 		return fmt.Sprintf("SetPortBasedVLAN(vlan=%d, ports=%v)", c.VLANID, c.VLANPorts)
+	case "Set8021QVLAN":
+		return fmt.Sprintf("Set8021QVLAN(vlan=%d, tagged=%v, untagged=%v)", c.VLANID, c.Tagged, c.Untagged)
+	case "Delete8021QVLAN":
+		return fmt.Sprintf("Delete8021QVLAN(vlan=%d)", c.VLANID)
+	case "SetPVID":
+		return fmt.Sprintf("SetPVID(port=%d, vlan=%d)", c.Port, c.VLANID)
 	}
 	return fmt.Sprintf("%s(port=%d)", c.Method, c.Port)
 }
@@ -90,6 +99,30 @@ type fakeSwitch struct {
 	// port-based VLAN table (vlan id → sorted ports).
 	engineMode nsdp.VLANEngineMode
 	pbvlans    map[int][]int
+
+	// Live 802.1Q VLAN table (block 0x28) and PVID table (block 0x30),
+	// stored in wire form: one membership per VLAN, PVID per port
+	// (indexed 1..8, index 0 unused). Defaults mirror the factory:
+	// VLAN 1 untagged on all ports, PVID 1 everywhere.
+	vlan8021Q []nsdp.VLAN8021QMembership
+	pvid      [9]int
+
+	// Live identity (GETs only, no login), mirroring nsdptest's
+	// lab-plausible defaults.
+	productName  string
+	modelCode    uint16
+	firmware     string
+	serialNumber string
+	systemName   string
+
+	// Reply8021QRolesSwapped mirrors nsdptest's GAP-1 knob: 0x2800
+	// block replies report the two role bytes swapped (read side only —
+	// the stored table keeps the written roles).
+	Reply8021QRolesSwapped bool
+
+	// pvidTableOverride, when non-nil, makes GetPVIDs return exactly
+	// this (short/corrupt tables for typed-error tests).
+	pvidTableOverride []nsdp.PVIDEntry
 
 	// Every SET invocation, in order.
 	calls []fakeSwitchCall
@@ -127,6 +160,17 @@ func (f *fakeSwitch) resetFactoryDefaults() {
 	f.mirrorSrcPorts = nil
 	f.engineMode = 1 // nsdp.VLANEngineMode port-based
 	f.pbvlans = map[int][]int{1: {1, 2, 3, 4, 5, 6, 7, 8}}
+	f.vlan8021Q = []nsdp.VLAN8021QMembership{{VLANID: 1, Tagged: 0x00, Untagged: 0xff}}
+	for port := 1; port <= 8; port++ {
+		f.pvid[port] = 1
+	}
+	f.productName = "GS108Ev3"
+	f.modelCode = 0x0100
+	f.firmware = "V2.06.24"
+	f.serialNumber = "UH77B5R033EE"
+	f.systemName = "fake"
+	f.Reply8021QRolesSwapped = false
+	f.pvidTableOverride = nil
 }
 
 func (f *fakeSwitch) record(call fakeSwitchCall) {
@@ -304,6 +348,96 @@ func (f *fakeSwitch) SetPortBasedVLAN(vlanID int, ports []int) error {
 	f.record(fakeSwitchCall{Method: "SetPortBasedVLAN", VLANID: vlanID, VLANPorts: sortedIntPorts(ports)})
 	if !f.IgnoreSets && !f.AuthFailOnSet {
 		f.pbvlans[vlanID] = sortedIntPorts(ports)
+	}
+	return f.setReplyOutcome(len(f.calls))
+}
+
+// Get8021QVLANs reports the stored table, applying the GAP-1
+// Reply8021QRolesSwapped knob to the reply only (mirroring nsdptest's
+// FakeAgent semantics: the stored table keeps the written roles).
+func (f *fakeSwitch) Get8021QVLANs() ([]nsdp.VLAN8021QMembership, error) {
+	if f.GetBlockErr != nil {
+		return nil, f.GetBlockErr
+	}
+	out := make([]nsdp.VLAN8021QMembership, 0, len(f.vlan8021Q))
+	for _, entry := range f.vlan8021Q {
+		tagged, untagged := entry.Tagged, entry.Untagged
+		if f.Reply8021QRolesSwapped {
+			tagged, untagged = untagged, tagged
+		}
+		out = append(out, nsdp.VLAN8021QMembership{VLANID: entry.VLANID, Tagged: tagged, Untagged: untagged})
+	}
+	return out, nil
+}
+
+func (f *fakeSwitch) GetPVIDs() ([]nsdp.PVIDEntry, error) {
+	if f.GetBlockErr != nil {
+		return nil, f.GetBlockErr
+	}
+	if f.pvidTableOverride != nil {
+		return append([]nsdp.PVIDEntry(nil), f.pvidTableOverride...), nil
+	}
+	out := make([]nsdp.PVIDEntry, 0, 8)
+	for port := 1; port <= 8; port++ {
+		out = append(out, nsdp.PVIDEntry{Port: byte(port), VLANID: uint16(f.pvid[port])})
+	}
+	return out, nil
+}
+
+func (f *fakeSwitch) GetIdentity() (nsdp.SwitchIdentity, error) {
+	if f.GetBlockErr != nil {
+		return nsdp.SwitchIdentity{}, f.GetBlockErr
+	}
+	return nsdp.SwitchIdentity{
+		ProductName:     f.productName,
+		ModelCode:       f.modelCode,
+		FirmwareVersion: f.firmware,
+		SerialNumber:    f.serialNumber,
+		SystemName:      f.systemName,
+	}, nil
+}
+
+func (f *fakeSwitch) Set8021QVLAN(vlanID int, taggedPorts, untaggedPorts []int) error {
+	f.record(fakeSwitchCall{
+		Method:   "Set8021QVLAN",
+		VLANID:   vlanID,
+		Tagged:   sortedIntPorts(taggedPorts),
+		Untagged: sortedIntPorts(untaggedPorts),
+	})
+	if !f.IgnoreSets && !f.AuthFailOnSet {
+		membership := nsdp.NewVLAN8021QMembership(vlanID, taggedPorts, untaggedPorts)
+		replaced := false
+		for i := range f.vlan8021Q {
+			if int(f.vlan8021Q[i].VLANID) == vlanID {
+				f.vlan8021Q[i] = membership
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			f.vlan8021Q = append(f.vlan8021Q, membership)
+		}
+	}
+	return f.setReplyOutcome(len(f.calls))
+}
+
+func (f *fakeSwitch) Delete8021QVLAN(vlanID int) error {
+	f.record(fakeSwitchCall{Method: "Delete8021QVLAN", VLANID: vlanID})
+	if !f.IgnoreSets && !f.AuthFailOnSet {
+		for i := range f.vlan8021Q {
+			if int(f.vlan8021Q[i].VLANID) == vlanID {
+				f.vlan8021Q = append(f.vlan8021Q[:i], f.vlan8021Q[i+1:]...)
+				break
+			}
+		}
+	}
+	return f.setReplyOutcome(len(f.calls))
+}
+
+func (f *fakeSwitch) SetPVID(port, vlanID int) error {
+	f.record(fakeSwitchCall{Method: "SetPVID", Port: port, VLANID: vlanID})
+	if !f.IgnoreSets && !f.AuthFailOnSet {
+		f.pvid[port] = vlanID
 	}
 	return f.setReplyOutcome(len(f.calls))
 }

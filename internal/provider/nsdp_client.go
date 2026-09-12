@@ -37,6 +37,25 @@ type nsdpClient interface {
 	SetBlockUnknownMulticast(blocked bool) error
 	SetPortMirroring(destPort int, srcPorts []int) error
 	SetPortBasedVLAN(vlanID int, ports []int) error
+
+	// Dual-transport surface (vlan.go, identity.go, methods.go): the
+	// vlan_state resource family runs over NSDP through
+	// nsdpSwitchTransport. Read sides: the 802.1Q table (block 0x28),
+	// the PVID table (block 0x30), and switch identity (GETs only, no
+	// login). Write sides: Set8021QVLAN adds-or-modifies one 802.1Q
+	// VLAN, Delete8021QVLAN removes one (idempotent, live-proven),
+	// SetPVID writes one port's PVID.
+	//
+	// GAP-1 PENDING: Set8021QVLAN's tagged/untagged payload order and
+	// Get8021QVLANs' reply role interpretation follow the library's
+	// ProSafeLinux-derived assumption; see internal/nsdp/vlan.go for the
+	// pending-verdict swap matrix.
+	Get8021QVLANs() ([]nsdp.VLAN8021QMembership, error)
+	GetPVIDs() ([]nsdp.PVIDEntry, error)
+	GetIdentity() (nsdp.SwitchIdentity, error)
+	Set8021QVLAN(vlanID int, taggedPorts, untaggedPorts []int) error
+	Delete8021QVLAN(vlanID int) error
+	SetPVID(port, vlanID int) error
 }
 
 // cachedNSDPClient is the NSDP counterpart of cachedDriverSession. Its
@@ -57,7 +76,7 @@ func normalizeAgentMAC(value string) string {
 // building it on first use (lazily, mirroring driverForConfig). The same
 // fingerprint always yields the same instance: the nsdp client is NOT
 // safe for concurrent use, so callers must already hold the per-device
-// mutex (see withNSDPClient / withDriverForHost).
+// mutex (see withNSDPClient / withSwitchTransport).
 func (d *providerData) nsdpClient(ctx context.Context) (nsdpClient, error) {
 	_ = ctx // reserved for future factory plumbing; nsdp.NewClient takes none
 
@@ -160,7 +179,7 @@ func isNSDPAuthFailure(err error) bool {
 }
 
 // withNSDPClient runs fn with the provider's NSDP client, serialized
-// against the same device key as HTTP operations (withDriverForHost), so
+// against the same device key as HTTP operations (withSwitchTransport), so
 // an HTTP VLAN apply and an NSDP SET on the same physical switch can
 // never interleave.
 //
