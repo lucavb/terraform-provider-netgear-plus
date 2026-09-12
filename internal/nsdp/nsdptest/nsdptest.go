@@ -73,17 +73,35 @@ type Options struct {
 	Password string
 	// Attrs seeds scripted small-tag GET answers beyond the built-in
 	// capability (0x14), nonce (0x17) and system-name (0x03) tags. The
-	// map is copied.
+	// map is copied LAST — after the identity defaults — so entries here
+	// override the seeded identity strings too.
 	Attrs map[byte][]byte
+
+	// Identity scripting (optional; zero values take the lab-plausible
+	// defaults, see seedIdentity):
+	ProductName string // tag 0x0001
+	// ModelCode is the BE16 model code (tag 0x0002); 0 = default 0x0100.
+	ModelCode uint16
+	// Firmware1/Firmware2 are the firmware image strings (tags 0x000d /
+	// 0x000e); empty Firmware1 = "V2.06.24", empty Firmware2 = Firmware1.
+	Firmware1 string
+	Firmware2 string
+	// SerialNumber is the serial (block 0x78, tag 0x7800); empty =
+	// "FAKESERIAL01". The reply blob carries the live 21-byte layout,
+	// so clients must parse it like the real thing.
+	SerialNumber string
 }
 
-// VLAN8021QEntry is one stored 802.1Q table entry: the verbatim 4-byte SET
-// value {vlan u16 BE, A u8, B u8} (nsdp.Client.Set8021QVLAN sends A =
-// tagged port bitmap, B = untagged port bitmap).
+// VLAN8021QEntry is one stored 802.1Q table entry: the verbatim 4-byte
+// SET value {vlan u16 BE, byte2, byte3} with byte roles assigned per the
+// library's ProSafeLinux-derived assumption (nsdp.Client.Set8021QVLAN
+// sends byte2 = tagged bitmap, byte3 = untagged bitmap — the GAP-1
+// write-order note on Set8021QVLAN applies here too; the
+// Reply8021QRolesSwapped knob can report the roles back swapped).
 type VLAN8021QEntry struct {
-	VLANID uint16
-	A      byte
-	B      byte
+	VLANID   uint16
+	Tagged   byte // SET byte2 under the library's tagged-first assumption
+	Untagged byte // SET byte3
 }
 
 // FakeAgent is a scripted NSDP v2 switch: a UDP listener on a loopback
@@ -102,13 +120,22 @@ type VLAN8021QEntry struct {
 //	    apply it — the silent no-op quirk.
 //	AuthFail: reject the login/auth token with the auth-mismatch
 //	    reply (status 0x0d) to simulate an authentication failure.
+//	Reply8021QRolesSwapped: encode 0x2800 block replies with
+//	    byte2/byte3 SWAPPED relative to what SETs applied — the GAP-1
+//	    adversarial world where the library's byte2=tagged read
+//	    assumption is backwards. Writes still land as the library
+//	    intends (the SET handler applies byte2 = Tagged), so any
+//	    disagreement a client observes between what it wrote and what
+//	    Get8021QVLANs reports is purely the reply encoder's doing —
+//	    the mismatch is observable at the library boundary by design.
 //
 // All remaining state is guarded by an internal mutex; the exported
 // getters are goroutine-safe and return copies.
 type FakeAgent struct {
-	DropSetReplies bool
-	IgnoreSets     bool
-	AuthFail       bool
+	DropSetReplies         bool
+	IgnoreSets             bool
+	AuthFail               bool
+	Reply8021QRolesSwapped bool
 
 	mu       sync.Mutex
 	conn     net.PacketConn
@@ -120,6 +147,7 @@ type FakeAgent struct {
 	// Scripted switch state, seeded with factory defaults (resetFactory).
 	systemName string
 	attrs      map[byte][]byte // scripted small-tag answers
+	serial     string          // block 0x78 answers derive from it
 
 	portAdmin  [8][2]byte                // 0x9400: {admin, flow} per 1-based port
 	speedLink  [8][2]byte                // 0x0c00: {speed, flow} (flow mirrors the 0x9400 flow byte)
@@ -166,7 +194,7 @@ func newAgent(opts Options) (*FakeAgent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bind loopback UDP: %w", err)
 	}
-	a := newAgentOverConn(conn, mac, password, opts.Attrs)
+	a := newAgentOverConn(conn, mac, password, opts)
 	go a.serve()
 	return a, nil
 }
@@ -174,7 +202,7 @@ func newAgent(opts Options) (*FakeAgent, error) {
 // newAgentOverConn assembles the agent around an already-bound connection
 // and seeds the factory state. (Split from newAgent so in-package tests
 // can drive the same protocol logic over an in-memory conn.)
-func newAgentOverConn(conn net.PacketConn, mac net.HardwareAddr, password string, attrs map[byte][]byte) *FakeAgent {
+func newAgentOverConn(conn net.PacketConn, mac net.HardwareAddr, password string, opts Options) *FakeAgent {
 	nonce := make([]byte, 4)
 	for i := range nonce {
 		nonce[i] = byte(rand.IntN(256))
@@ -184,13 +212,60 @@ func newAgentOverConn(conn net.PacketConn, mac net.HardwareAddr, password string
 		mac:      append(net.HardwareAddr(nil), mac...),
 		password: password,
 		nonce:    nonce,
-		attrs:    make(map[byte][]byte, len(attrs)),
-	}
-	for tag, v := range attrs {
-		a.attrs[tag] = append([]byte(nil), v...)
+		attrs:    make(map[byte][]byte, len(opts.Attrs)),
 	}
 	a.resetFactory()
+	// Identity is hardware-like: seeded once at construction, never by
+	// resetFactory (it survives TagFactoryDefaults, like the real
+	// switch's serial and model). Options.Attrs is copied LAST so the
+	// raw escape hatch can still override any scripted answer.
+	a.seedIdentity(opts)
+	for tag, v := range opts.Attrs {
+		a.attrs[tag] = append([]byte(nil), v...)
+	}
 	return a
+}
+
+// seedIdentity scripts the identity strings from Options, filling
+// zero-valued fields with lab-plausible defaults. The values ride the
+// ordinary small-tag answers (0x0001/0x0002/0x000d/0x000e) and the
+// block-0x78 serial read.
+func (a *FakeAgent) seedIdentity(opts Options) {
+	productName := opts.ProductName
+	if productName == "" {
+		productName = "GS108Ev3"
+	}
+	modelCode := opts.ModelCode
+	if modelCode == 0 {
+		modelCode = 0x0100
+	}
+	fw1, fw2 := opts.Firmware1, opts.Firmware2
+	if fw1 == "" {
+		fw1 = "V2.06.24"
+	}
+	if fw2 == "" {
+		fw2 = fw1
+	}
+	serial := opts.SerialNumber
+	if serial == "" {
+		serial = "FAKESERIAL01"
+	}
+	a.attrs[byte(nsdp.TagProductName)] = []byte(productName)
+	a.attrs[byte(nsdp.TagModelCode)] = []byte{byte(modelCode >> 8), byte(modelCode)}
+	a.attrs[byte(nsdp.TagFirmware1)] = []byte(fw1)
+	a.attrs[byte(nsdp.TagFirmware2)] = []byte(fw2)
+	a.serial = serial
+}
+
+// serialBlob builds a tag-0x7800 value in the live 21-byte layout
+// (ROUND 11): {0x01, 0x33, 12-char serial field, NUL padding} — the
+// serial string padded/truncated into the pinned v[2:14] window.
+func serialBlob(serial string) []byte {
+	field := make([]byte, 12)
+	copy(field, serial)
+	v := []byte{0x01, 0x33}
+	v = append(v, field...)
+	return append(v, make([]byte, 21-len(v))...)
 }
 
 // resetFactory seeds the scripted state with factory-fresh GS108Ev3 values.
@@ -207,7 +282,7 @@ func (a *FakeAgent) resetFactory() {
 	a.qosMode = byte(nsdp.QoSModePortBased)
 	a.blockMcast = 0
 	a.portVLANs = []nsdp.PortBasedVLANEntry{{VLANID: 1, Ports: 0xff}}
-	a.vlan8021Q = []VLAN8021QEntry{{VLANID: 1, A: 0x00, B: 0xff}}
+	a.vlan8021Q = []VLAN8021QEntry{{VLANID: 1, Tagged: 0x00, Untagged: 0xff}}
 }
 
 // Addr returns the loopback UDP address the agent listens on — the peer
@@ -390,10 +465,20 @@ func (a *FakeAgent) replyBlockGet(req []byte, addr net.Addr, blockID byte) {
 		}
 	case nsdp.Tag8021QVLAN:
 		for _, e := range a.vlan8021Q {
+			// Default: mirror the stored (SET-applied) roles. With the
+			// Reply8021QRolesSwapped knob, byte2/byte3 come back
+			// EXCHANGED — the adversarial GAP-1 world where the
+			// library's byte2=tagged read assumption is backwards.
+			b2, b3 := e.Tagged, e.Untagged
+			if a.Reply8021QRolesSwapped {
+				b2, b3 = e.Untagged, e.Tagged
+			}
 			tlvs = append(tlvs, nsdp.TLV{Tag: tag, Value: []byte{
-				byte(e.VLANID >> 8), byte(e.VLANID), e.A, e.B,
+				byte(e.VLANID >> 8), byte(e.VLANID), b2, b3,
 			}})
 		}
+	case nsdp.TagSerialNumber:
+		tlvs = append(tlvs, nsdp.TLV{Tag: tag, Value: serialBlob(a.serial)})
 	default:
 		return // unknown block: silent
 	}
@@ -540,19 +625,21 @@ func (a *FakeAgent) applyTLV(t nsdp.TLV) error {
 		a.portVLANs = append(a.portVLANs, nsdp.PortBasedVLANEntry{VLANID: id, Ports: v[2]})
 		return nil
 	case nsdp.Tag8021QVLAN:
-		// Live-observed per-vlan entries {vlan u16 BE, A u8, B u8};
-		// the SET value is stored verbatim, keyed by VLAN.
+		// GAP-1 assumption, mirroring the real Set8021QVLAN payload
+		// order: byte2 = TAGGED bitmap, byte3 = UNTAGGED bitmap. Stored
+		// verbatim keyed by VLAN id; the Reply8021QRolesSwapped knob
+		// can then report the roles back swapped.
 		if len(v) != 4 {
-			return fmt.Errorf("0x%04x: want 4 bytes {vlan_id u16 BE, A, B}, got %d", t.Tag, len(v))
+			return fmt.Errorf("0x%04x: want 4 bytes {vlan_id u16 BE, tagged, untagged}, got %d", t.Tag, len(v))
 		}
 		id := binary.BigEndian.Uint16(v[0:2])
 		for i := range a.vlan8021Q {
 			if a.vlan8021Q[i].VLANID == id {
-				a.vlan8021Q[i].A, a.vlan8021Q[i].B = v[2], v[3]
+				a.vlan8021Q[i].Tagged, a.vlan8021Q[i].Untagged = v[2], v[3]
 				return nil
 			}
 		}
-		a.vlan8021Q = append(a.vlan8021Q, VLAN8021QEntry{VLANID: id, A: v[2], B: v[3]})
+		a.vlan8021Q = append(a.vlan8021Q, VLAN8021QEntry{VLANID: id, Tagged: v[2], Untagged: v[3]})
 		return nil
 	case nsdp.TagDelete8021QVLAN:
 		if len(v) != 2 {
@@ -706,9 +793,18 @@ func (a *FakeAgent) PortBasedVLANs() []nsdp.PortBasedVLANEntry {
 }
 
 // VLAN8021Q returns a copy of the stored 802.1Q table entries (0x2800),
-// each the verbatim {vlan u16 BE, A, B} SET value.
+// each {vlan, Tagged, Untagged} exactly as the SET path applied them
+// (byte2 = Tagged under the library's tagged-first assumption).
 func (a *FakeAgent) VLAN8021Q() []VLAN8021QEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]VLAN8021QEntry(nil), a.vlan8021Q...)
+}
+
+// SerialNumber returns the scripted serial string — the ASCII serial
+// the block-0x78 answers embed in the live 21-byte blob layout.
+func (a *FakeAgent) SerialNumber() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.serial
 }

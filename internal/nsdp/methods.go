@@ -376,6 +376,19 @@ func (c *Client) SetPortBasedVLAN(vlanID int, ports []int) error {
 // Set8021QVLAN adds or modifies an 802.1Q VLAN with tagged and untagged
 // port assignments.
 //
+// ─── GAP-1 WRITE-ORDER NOTE (unproven on live hardware) ───
+// Tagged-first is the ProSafeLinux-derived ASSUMPTION: the payload is
+// built as {vlan_id u16 BE, TAGGED bitmap u8, UNTAGGED bitmap u8}, and
+// the live reply's role order is not yet confirmed. If the nsdp-gaps.sh
+// stage-2 verdict says the switch stores byte 2 = UNTAGGED in BOTH
+// directions (ROLE A = untagged with UI confirm n), the swap happens
+// HERE and ONLY here: exchange the PortBitmap(taggedPorts) and
+// PortBitmap(untaggedPorts) assignments in the payload build below.
+// If only the REPLY order differs (ROLE A = untagged with UI confirm
+// y), the write path stays as-is and only decode8021QEntry (vlan.go)
+// swaps. The read-side seam's comment block holds the full matrix.
+// ───────────────────────────────────────────────────────────────────
+//
 // VLANID is the VLAN identifier. TaggedPorts and UntaggedPorts are lists
 // of 1-based port numbers.
 // Payload layout: {vlan_id u16 BE, tagged_bitmap u8, untagged_bitmap u8} = 4 bytes.

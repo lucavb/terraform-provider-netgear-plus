@@ -115,7 +115,7 @@ func startMemSession(t *testing.T, opts Options) (*FakeAgent, *nsdp.Client) {
 		password = "password"
 	}
 	agentConn, clientConn := memConnPair()
-	agent := newAgentOverConn(agentConn, mac, password, opts.Attrs)
+	agent := newAgentOverConn(agentConn, mac, password, opts)
 	go agent.serve()
 	t.Cleanup(func() {
 		agent.Close()
@@ -131,9 +131,10 @@ func startMemSession(t *testing.T, opts Options) (*FakeAgent, *nsdp.Client) {
 // TestFakeAgentProtocolInMemory walks the full scenario surface over the
 // in-memory transport: login + token refresh, the AuthFail rejection with
 // the honest ExpectedAuth, every scripted factory block, the port-status
-// SET→read-back, the reply-loss and silent-no-op quirks, and the VLAN
-// tables. (Mirrors the UDP suite; see agent_test.go for the per-scenario
-// docs.)
+// SET→read-back, the reply-loss and silent-no-op quirks, the VLAN
+// tables, the typed 802.1Q/PVID round-trips, the GAP-1 role-mismatch
+// visibility, and the identity read. (Mirrors the UDP suite; see
+// agent_test.go for the per-scenario docs.)
 func TestFakeAgentProtocolInMemory(t *testing.T) {
 	agent, c := startMemSession(t, Options{Password: "hunter2"})
 
@@ -144,4 +145,12 @@ func TestFakeAgentProtocolInMemory(t *testing.T) {
 	assertReplyLossScenario(t, agent, c)
 	assertSilentNoOpScenario(t, agent, c)
 	assertVLANTables(t, agent, c)
+	assert8021QRoundTrip(t, agent, c)
+	assertRoleMismatchVisibility(t, agent, c)
+	assertIdentity(t, agent, c, nsdp.SwitchIdentity{
+		ProductName:     "GS108Ev3",
+		ModelCode:       0x0100,
+		FirmwareVersion: "V2.06.24",
+		SystemName:      "GS108Ev3", // factory default identity values
+	})
 }

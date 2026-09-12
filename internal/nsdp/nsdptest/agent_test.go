@@ -347,8 +347,195 @@ func assertVLANTables(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 		t.Fatalf("802.1q VLAN 10 entry = % x, want {vlan 10, A 0xc0, B 0x20}", vq[1].Value)
 	}
 	stored := agent.VLAN8021Q()
-	if len(stored) != 2 || stored[1] != (VLAN8021QEntry{VLANID: 10, A: 0xc0, B: 0x20}) {
-		t.Fatalf("agent 802.1q state = %#v, want VLAN 10 {A 0xc0, B 0x20} stored verbatim", stored)
+	if len(stored) != 2 || stored[1] != (VLAN8021QEntry{VLANID: 10, Tagged: 0xc0, Untagged: 0x20}) {
+		t.Fatalf("agent 802.1q state = %#v, want VLAN 10 {Tagged 0xc0, Untagged 0x20} stored verbatim", stored)
+	}
+}
+
+// assert8021QRoundTrip exercises the typed table surfaces: the
+// Set8021QVLAN/Get8021QVLANs round-trip (GAP-1 default roles), the
+// SetPVID/GetPVIDs round-trip, Delete8021QVLAN, and the live-proven
+// idempotent re-delete. The probe shape mirrors nsdp-gaps.sh stage 2
+// (asymmetric membership: port 3 tagged, port 5 untagged on VLAN 999).
+// Ends with the table back at factory state.
+func assert8021QRoundTrip(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
+	t.Helper()
+	if err := c.Set8021QVLAN(999, []int{3}, []int{5}); err != nil {
+		t.Fatalf("Set8021QVLAN(999, [3], [5]): %v", err)
+	}
+	table, err := c.Get8021QVLANs()
+	if err != nil {
+		t.Fatalf("Get8021QVLANs: %v", err)
+	}
+	var m *nsdp.VLAN8021QMembership
+	for i := range table {
+		if table[i].VLANID == 999 {
+			m = &table[i]
+		}
+	}
+	if m == nil {
+		t.Fatalf("VLAN 999 missing from the 802.1q table: %+v", table)
+	}
+	if m.Tagged != nsdp.PortBitmap([]int{3}) || m.Untagged != nsdp.PortBitmap([]int{5}) {
+		t.Fatalf("VLAN 999 = %+v, want {Tagged 0x20, Untagged 0x08} (GAP-1 default roles)", *m)
+	}
+	if tp := m.TaggedPorts(); len(tp) != 1 || tp[0] != 3 {
+		t.Fatalf("TaggedPorts() = %v, want [3]", tp)
+	}
+	if up := m.UntaggedPorts(); len(up) != 1 || up[0] != 5 {
+		t.Fatalf("UntaggedPorts() = %v, want [5]", up)
+	}
+	for _, e := range table {
+		if e.VLANID == 1 && (e.Tagged != 0x00 || e.Untagged != 0xff) {
+			t.Fatalf("factory VLAN 1 = %+v, want untouched {Tagged 0x00, Untagged 0xff}", e)
+		}
+	}
+	if got := nsdp.NewVLAN8021QMembership(999, m.TaggedPorts(), m.UntaggedPorts()); got != *m {
+		t.Fatalf("membership helper round-trip = %+v, want %+v", got, *m)
+	}
+
+	// Delete + the live-proven idempotent re-delete of a missing VLAN.
+	if err := c.Delete8021QVLAN(999); err != nil {
+		t.Fatalf("Delete8021QVLAN(999): %v", err)
+	}
+	if err := c.Delete8021QVLAN(999); err != nil {
+		t.Fatalf("Delete8021QVLAN(999) re-delete (idempotent no-op): %v", err)
+	}
+	table, err = c.Get8021QVLANs()
+	if err != nil {
+		t.Fatalf("Get8021QVLANs after delete: %v", err)
+	}
+	for _, e := range table {
+		if e.VLANID == 999 {
+			t.Fatalf("802.1q table after delete still carries VLAN 999: %+v", table)
+		}
+		if e.VLANID == 1 && (e.Tagged != 0x00 || e.Untagged != 0xff) {
+			t.Fatalf("factory VLAN 1 = %+v after delete, want untouched {Tagged 0x00, Untagged 0xff}", e)
+		}
+	}
+
+	// PVID round-trip: set port 3 -> 999, read back, restore factory 1.
+	if err := c.SetPVID(3, 999); err != nil {
+		t.Fatalf("SetPVID(3, 999): %v", err)
+	}
+	pvids, err := c.GetPVIDs()
+	if err != nil {
+		t.Fatalf("GetPVIDs: %v", err)
+	}
+	if len(pvids) != 8 {
+		t.Fatalf("GetPVIDs returned %d entries, want 8 (one per port)", len(pvids))
+	}
+	var p3 *nsdp.PVIDEntry
+	for i := range pvids {
+		if pvids[i].Port == 3 {
+			p3 = &pvids[i]
+		}
+	}
+	if p3 == nil || p3.VLANID != 999 {
+		t.Fatalf("port 3 PVID after SetPVID = %+v, want {port 3, vlan 999}", p3)
+	}
+	if err := c.SetPVID(3, 1); err != nil {
+		t.Fatalf("SetPVID(3, 1) restore: %v", err)
+	}
+	pvids, err = c.GetPVIDs()
+	if err != nil {
+		t.Fatalf("GetPVIDs after restore: %v", err)
+	}
+	for _, e := range pvids {
+		if e.Port == 3 && e.VLANID != 1 {
+			t.Fatalf("port 3 PVID after restore = %+v, want vlan 1", e)
+		}
+	}
+}
+
+// assertRoleMismatchVisibility proves the GAP-1 adversarial world is
+// OBSERVABLE at the library boundary: with the fake's reply encoder
+// swapping the 0x2800 role bytes (Reply8021QRolesSwapped),
+// Get8021QVLANs returns roles that DISAGREE with what was written.
+//
+// CONTRACT: a verify-corrective layer built on this surface can convert
+// that disagreement into a typed drift error — the role mismatch can
+// never masquerade as silent success, because the readback visibly
+// contradicts the write. Ends with the knob cleared and VLAN 999 gone.
+func assertRoleMismatchVisibility(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
+	t.Helper()
+	if err := c.Set8021QVLAN(999, []int{3}, []int{5}); err != nil {
+		t.Fatalf("Set8021QVLAN(999, [3], [5]): %v", err)
+	}
+	agent.Reply8021QRolesSwapped = true
+	defer func() { agent.Reply8021QRolesSwapped = false }()
+
+	table, err := c.Get8021QVLANs()
+	if err != nil {
+		t.Fatalf("Get8021QVLANs (swapped-roles reply): %v", err)
+	}
+	var m *nsdp.VLAN8021QMembership
+	for i := range table {
+		if table[i].VLANID == 999 {
+			m = &table[i]
+		}
+	}
+	if m == nil {
+		t.Fatalf("VLAN 999 missing from the swapped-roles read: %+v", table)
+	}
+	// WROTE Tagged={3} (0x20), Untagged={5} (0x08); the swapped reply
+	// must decode to the exact OPPOSITE roles — the disagreement is the
+	// observable signal a drift detector needs.
+	if m.Tagged == nsdp.PortBitmap([]int{3}) && m.Untagged == nsdp.PortBitmap([]int{5}) {
+		t.Fatalf("swapped-roles reply decoded to the WRITTEN roles %+v — the mismatch is NOT observable (knob broken?)", *m)
+	}
+	if m.Tagged != nsdp.PortBitmap([]int{5}) || m.Untagged != nsdp.PortBitmap([]int{3}) {
+		t.Fatalf("swapped-roles reply decoded to %+v, want the written roles exchanged (Tagged 0x08, Untagged 0x20)", *m)
+	}
+	// The stored state still holds exactly what the SET applied
+	// (tagged-first): the disagreement is purely reply encoding.
+	stored := agent.VLAN8021Q()
+	var s *VLAN8021QEntry
+	for i := range stored {
+		if stored[i].VLANID == 999 {
+			s = &stored[i]
+		}
+	}
+	if s == nil || s.Tagged != nsdp.PortBitmap([]int{3}) || s.Untagged != nsdp.PortBitmap([]int{5}) {
+		t.Fatalf("agent stored state = %+v, want VLAN 999 {Tagged 0x20, Untagged 0x08} as applied", stored)
+	}
+
+	// Knob cleared: reads agree with the written roles again (recovery).
+	agent.Reply8021QRolesSwapped = false
+	table, err = c.Get8021QVLANs()
+	if err != nil {
+		t.Fatalf("Get8021QVLANs (knob cleared): %v", err)
+	}
+	for i := range table {
+		if table[i].VLANID == 999 {
+			m = &table[i]
+		}
+	}
+	if m == nil || m.Tagged != nsdp.PortBitmap([]int{3}) || m.Untagged != nsdp.PortBitmap([]int{5}) {
+		t.Fatalf("VLAN 999 after knob cleared = %+v, want the written roles back (Tagged 0x20, Untagged 0x08)", table)
+	}
+	if err := c.Delete8021QVLAN(999); err != nil {
+		t.Fatalf("Delete8021QVLAN(999) cleanup: %v", err)
+	}
+}
+
+// assertIdentity reads the identity surface end-to-end against the
+// agent's scripted strings: the multi-tag GET must decode product name,
+// model code, firmware and system name, and the block-0x78 serial read
+// must parse and trim the 21-byte blob. want carries the expected
+// identity; its SerialNumber AND SystemName fields are overwritten from
+// the agent — the single source of truth (earlier scenario asserts may
+// have renamed the switch under the shared in-memory session).
+func assertIdentity(t *testing.T, agent *FakeAgent, c *nsdp.Client, want nsdp.SwitchIdentity) {
+	t.Helper()
+	want.SerialNumber = agent.SerialNumber()
+	want.SystemName = agent.SystemName()
+	id, err := c.GetIdentity()
+	if err != nil {
+		t.Fatalf("GetIdentity: %v", err)
+	}
+	if id != want {
+		t.Fatalf("GetIdentity = %+v, want %+v", id, want)
 	}
 }
 
@@ -428,4 +615,48 @@ func TestSetSilentNoOpScenario(t *testing.T) {
 func TestSetVLANTables(t *testing.T) {
 	agent, c := startClient(t, Options{Password: "hunter2"})
 	assertVLANTables(t, agent, c)
+}
+
+func Test8021QVLANRoundTrip(t *testing.T) {
+	agent, c := startClient(t, Options{Password: "hunter2"})
+	assert8021QRoundTrip(t, agent, c)
+}
+
+func Test8021QRoleMismatchVisibility(t *testing.T) {
+	agent, c := startClient(t, Options{Password: "hunter2"})
+	assertRoleMismatchVisibility(t, agent, c)
+}
+
+// TestIdentityReadBack scripts a full identity and reads it back over
+// pure NSDP GETs — the switch-data-source surface.
+func TestIdentityReadBack(t *testing.T) {
+	agent, c := startClient(t, Options{
+		Password:     "hunter2",
+		ProductName:  "GS108Ev3",
+		ModelCode:    0x000a,
+		Firmware1:    "9.9.9",
+		SerialNumber: "UH77B5R033EE",
+	})
+	assertIdentity(t, agent, c, nsdp.SwitchIdentity{
+		ProductName:     "GS108Ev3",
+		ModelCode:       0x000a,
+		FirmwareVersion: "9.9.9",
+		SystemName:      "GS108Ev3", // factory
+	})
+}
+
+// TestIdentityFirmwareFallback: with tag 0x000d answered EMPTY (via the
+// raw Attrs escape hatch, which overrides the seeded identity), the
+// firmware version must fall back to tag 0x000e.
+func TestIdentityFirmwareFallback(t *testing.T) {
+	agent, c := startClient(t, Options{
+		Firmware2: "7.7.7",
+		Attrs:     map[byte][]byte{byte(nsdp.TagFirmware1): {}},
+	})
+	assertIdentity(t, agent, c, nsdp.SwitchIdentity{
+		ProductName:     "GS108Ev3",
+		ModelCode:       0x0100,
+		FirmwareVersion: "7.7.7", // 0x000d empty -> 0x000e
+		SystemName:      "GS108Ev3",
+	})
 }
