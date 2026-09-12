@@ -71,7 +71,11 @@ func PortBitmap(ports []int) byte {
 //
 // Port is 1-based (1–8). VLANID is the 12-bit VLAN identifier (1–4094).
 // Payload layout: {port u8, vlan_id u16 BE} = 3 bytes.
-// CONFIRMED layout (ProSafeLinux psl_typ.py:595-612).
+// LIVE-PROVEN both directions (casalta probe, 2026-09-12,
+// gaps-20260912-163538.log stage 3): port 3 PVID 1 -> 999 read back
+// correct, then restored to 1 and re-verified, all other PVID entries
+// untouched. CONFIRMED layout (live probe + ProSafeLinux
+// psl_typ.py:595-612).
 func (c *Client) SetPVID(port, vlanID int) error {
 	if port < 1 || port > 8 {
 		return fmt.Errorf("nsdp: port %d out of range [1,8]", port)
@@ -376,42 +380,58 @@ func (c *Client) SetPortBasedVLAN(vlanID int, ports []int) error {
 // Set8021QVLAN adds or modifies an 802.1Q VLAN with tagged and untagged
 // port assignments.
 //
-// ─── GAP-1 WRITE-ORDER NOTE (unproven on live hardware) ───
-// Tagged-first is the ProSafeLinux-derived ASSUMPTION: the payload is
-// built as {vlan_id u16 BE, TAGGED bitmap u8, UNTAGGED bitmap u8}, and
-// the live reply's role order is not yet confirmed. If the nsdp-gaps.sh
-// stage-2 verdict says the switch stores byte 2 = UNTAGGED in BOTH
-// directions (ROLE A = untagged with UI confirm n), the swap happens
-// HERE and ONLY here: exchange the PortBitmap(taggedPorts) and
-// PortBitmap(untaggedPorts) assignments in the payload build below.
-// If only the REPLY order differs (ROLE A = untagged with UI confirm
-// y), the write path stays as-is and only decode8021QEntry (vlan.go)
-// swaps. The read-side seam's comment block holds the full matrix.
+// ─── ROUND 19 layout (live evidence, casalta probe 2026-09-12,
+// gaps-20260912-163538.log) ───
+// The 0x2800 entry is {vlan_id u16 BE, MEMBER bitmap u8, TAGGED bitmap
+// u8} — untagged is DERIVED (member AND NOT tagged), never carried on
+// the wire. The earlier ProSafeLinux-derived tagged/untagged two-bitmap
+// payload is FALSIFIED: the stage-2 SET {03 e7 20 08} read under the
+// real model as members {3}, tagged {5} — tagged not a subset of
+// members — and the firmware silently dropped the whole membership,
+// storing VLAN 999 EMPTY with an OK reply (its known silent-no-op
+// behavior; the provider's verify-corrective layer exists for exactly
+// this). The payload below therefore sends byte2 = the member superset
+// (tagged|untagged) and byte3 = the tagged subset.
 // ───────────────────────────────────────────────────────────────────
 //
 // VLANID is the VLAN identifier. TaggedPorts and UntaggedPorts are lists
 // of 1-based port numbers.
-// Payload layout: {vlan_id u16 BE, tagged_bitmap u8, untagged_bitmap u8} = 4 bytes.
-// CONFIRMED layout (ProSafeLinux PslTypVlan802Id pack_py).
+// Payload layout: {vlan_id u16 BE, member_bitmap u8, tagged_bitmap u8} = 4 bytes,
+// where member_bitmap = PortBitmap(tagged|untagged).
+// LIVE-PROVEN entry model (ROUND 19); payload derived from the same
+// member/tagged wire model the six production VLANs fit with zero
+// contradictions.
 func (c *Client) Set8021QVLAN(vlanID int, taggedPorts, untaggedPorts []int) error {
 	if vlanID < 0 || vlanID > 4095 {
 		return fmt.Errorf("nsdp: vlan id %d out of range [0,4095]", vlanID)
 	}
+	return c.SetRaw(Tag8021QVLAN, vlan8021QPayload(vlanID, taggedPorts, untaggedPorts))
+}
+
+// vlan8021QPayload builds the 4-byte tag-0x2800 SET value
+// {vlan_id u16 BE, member, tagged} under the ROUND 19 wire model:
+// byte2 is the member superset (tagged|untagged), byte3 the tagged
+// subset. Extracted like portConfigPayload so the payload bytes are
+// unit-testable without network I/O (TestSet8021QVLANPayload).
+func vlan8021QPayload(vlanID int, taggedPorts, untaggedPorts []int) []byte {
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint16(buf[0:], uint16(vlanID))
-	buf[2] = PortBitmap(taggedPorts)
-	buf[3] = PortBitmap(untaggedPorts)
-	return c.SetRaw(Tag8021QVLAN, buf)
+	buf[2] = PortBitmap(taggedPorts) | PortBitmap(untaggedPorts)
+	buf[3] = PortBitmap(taggedPorts)
+	return buf
 }
 
 // Delete8021QVLAN deletes an 802.1Q VLAN entry.
 //
-// The payload is the VLAN ID as u16 BE. The firmware SET handler
-// (bank1 0x8174) passes the value through a bank5 helper (0x1916 ->
-// 0xe10e) whose check is NOT an existence test: live-proven, deleting a
-// VLAN that does not exist succeeds (idempotent no-op). Layout:
-// {vlan_id u16 BE} = 2 bytes. CONFIRMED (firmware; the tag is absent
-// from ProSafeLinux).
+// The payload is the VLAN ID as u16 BE. LIVE-PROVEN both directions
+// (casalta probe, 2026-09-12, gaps-20260912-163538.log stage 4): deleting
+// the existing VLAN 999 removed it while every other 0x2800 entry stayed
+// byte-identical, and the missing-VLAN delete is a no-op — the firmware
+// SET handler (bank1 0x8174) passes the value through a bank5 helper
+// (0x1916 -> 0xe10e) whose check is NOT an existence test, so
+// Delete8021QVLAN is idempotent. Layout: {vlan_id u16 BE} = 2 bytes.
+// CONFIRMED (live probe + firmware; the tag is absent from
+// ProSafeLinux).
 func (c *Client) Delete8021QVLAN(vlanID int) error {
 	if vlanID < 0 || vlanID > 4095 {
 		return fmt.Errorf("nsdp: vlan id %d out of range [0,4095]", vlanID)

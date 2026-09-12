@@ -115,10 +115,13 @@ type fakeSwitch struct {
 	serialNumber string
 	systemName   string
 
-	// Reply8021QRolesSwapped mirrors nsdptest's GAP-1 knob: 0x2800
-	// block replies report the two role bytes swapped (read side only —
-	// the stored table keeps the written roles).
-	Reply8021QRolesSwapped bool
+	// Reply8021QMembershipDropped mirrors nsdptest's knob: a 0x2800 SET
+	// replies OK but the VLAN is stored with EMPTY membership —
+	// replaying the real firmware behavior observed on the casalta
+	// GS108Ev3 (ROUND 19, 2026-09-12: a SET whose tagged bits are not
+	// a subset of its member bits is silently dropped, membership and
+	// all, reply OK).
+	Reply8021QMembershipDropped bool
 
 	// pvidTableOverride, when non-nil, makes GetPVIDs return exactly
 	// this (short/corrupt tables for typed-error tests).
@@ -169,7 +172,7 @@ func (f *fakeSwitch) resetFactoryDefaults() {
 	f.firmware = "V2.06.24"
 	f.serialNumber = "UH77B5R033EE"
 	f.systemName = "fake"
-	f.Reply8021QRolesSwapped = false
+	f.Reply8021QMembershipDropped = false
 	f.pvidTableOverride = nil
 }
 
@@ -352,21 +355,15 @@ func (f *fakeSwitch) SetPortBasedVLAN(vlanID int, ports []int) error {
 	return f.setReplyOutcome(len(f.calls))
 }
 
-// Get8021QVLANs reports the stored table, applying the GAP-1
-// Reply8021QRolesSwapped knob to the reply only (mirroring nsdptest's
-// FakeAgent semantics: the stored table keeps the written roles).
+// Get8021QVLANs reports the stored table (the logical Tagged/Untagged
+// sets, decoded and re-encoded by the library under the ROUND 19
+// member/tagged wire model).
 func (f *fakeSwitch) Get8021QVLANs() ([]nsdp.VLAN8021QMembership, error) {
 	if f.GetBlockErr != nil {
 		return nil, f.GetBlockErr
 	}
 	out := make([]nsdp.VLAN8021QMembership, 0, len(f.vlan8021Q))
-	for _, entry := range f.vlan8021Q {
-		tagged, untagged := entry.Tagged, entry.Untagged
-		if f.Reply8021QRolesSwapped {
-			tagged, untagged = untagged, tagged
-		}
-		out = append(out, nsdp.VLAN8021QMembership{VLANID: entry.VLANID, Tagged: tagged, Untagged: untagged})
-	}
+	out = append(out, f.vlan8021Q...)
 	return out, nil
 }
 
@@ -406,6 +403,12 @@ func (f *fakeSwitch) Set8021QVLAN(vlanID int, taggedPorts, untaggedPorts []int) 
 	})
 	if !f.IgnoreSets && !f.AuthFailOnSet {
 		membership := nsdp.NewVLAN8021QMembership(vlanID, taggedPorts, untaggedPorts)
+		if f.Reply8021QMembershipDropped {
+			// Replay the live-observed firmware behavior (casalta,
+			// ROUND 19, 2026-09-12): reply OK but store the VLAN with
+			// EMPTY membership.
+			membership.Tagged, membership.Untagged = 0, 0
+		}
 		replaced := false
 		for i := range f.vlan8021Q {
 			if int(f.vlan8021Q[i].VLANID) == vlanID {

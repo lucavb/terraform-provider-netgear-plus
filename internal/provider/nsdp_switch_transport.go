@@ -18,15 +18,18 @@ import (
 // GetPVIDs (reads), Set8021QVLAN / Delete8021QVLAN / SetPVID (writes),
 // GetIdentity (facts).
 //
-// GAP-1/GAP-2 PENDING (nsdp-gaps.sh live verdicts not yet recorded):
-// the 802.1Q read/write role interpretation follows the library's
-// ProSafeLinux-derived assumption (internal/nsdp/vlan.go). If a live
-// verdict swaps roles, the swap happens in the library and this adapter
-// follows automatically. The provider-side safety net is the
-// ROLE-MISMATCH contract: whatever the wire reports, ApplyVLANState
+// GAP-1 RESOLVED (ROUND 19 live probe, casalta, 2026-09-12): the
+// 0x2800 entry is {vlan_id u16 BE, MEMBER bitmap, TAGGED bitmap} —
+// untagged is derived (member AND NOT tagged). SetPVID and
+// Delete8021QVLAN are live-proven both directions (idempotent delete
+// no-op included). The interpretation lives entirely in the library
+// (internal/nsdp/vlan.go decode8021QEntry / Set8021QVLAN); this adapter
+// follows it automatically. The provider-side safety net is the
+// verify-corrective contract: whatever the wire reports, ApplyVLANState
 // writes the desired state and the resource layer's verify read fails
-// with a typed drift error instead of recording silent success — so a
-// wrong role assumption can never produce a falsely-green apply.
+// with a typed drift error instead of recording silent success — so
+// the firmware's observed silent membership drop (reply OK, empty
+// store) can never produce a falsely-green apply.
 // ---------------------------------------------------------------------------
 
 // nsdpSwitchTransport implements switchTransport over the provider's

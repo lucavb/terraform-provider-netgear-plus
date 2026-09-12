@@ -197,8 +197,8 @@ func assertFactoryBlocks(t *testing.T, _ *FakeAgent, c *nsdp.Client) {
 	if err != nil {
 		t.Fatalf("GetBlock 0x28: %v", err)
 	}
-	if len(vq) != 1 || !bytes.Equal(vq[0].Value, []byte{0x00, 0x01, 0x00, 0xff}) {
-		t.Fatalf("0x2800 = %d TLVs, first value % x, want one entry {vlan 1, A 0x00, B 0xff}", len(vq), vq[0].Value)
+	if len(vq) != 1 || !bytes.Equal(vq[0].Value, []byte{0x00, 0x01, 0xff, 0x00}) {
+		t.Fatalf("0x2800 = %d TLVs, first value % x, want one entry {vlan 1, member 0xff, tagged 0x00} under the ROUND 19 wire model", len(vq), vq[0].Value)
 	}
 
 	pvid, err := c.GetBlock(0x30, nil)
@@ -318,8 +318,9 @@ func assertSilentNoOpScenario(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 }
 
 // assertVLANTables exercises the two VLAN SET paths: the port-based entry
-// updates in place keyed by VLAN id, and the 802.1Q SET value is stored
-// verbatim as a {vlan, A, B} entry.
+// updates in place keyed by VLAN id, and the 802.1Q SET value is parsed
+// into the logical per-VLAN Tagged/Untagged sets under the ROUND 19
+// member/tagged wire model.
 func assertVLANTables(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 	t.Helper()
 	if err := c.SetPortBasedVLAN(1, []int{1, 2, 3}); err != nil {
@@ -343,21 +344,21 @@ func assertVLANTables(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 	if len(vq) != 2 { // default VLAN 1 + the new VLAN 10
 		t.Fatalf("802.1q table = %d TLVs, want 2", len(vq))
 	}
-	if !bytes.Equal(vq[1].Value, []byte{0x00, 0x0a, 0xc0, 0x20}) {
-		t.Fatalf("802.1q VLAN 10 entry = % x, want {vlan 10, A 0xc0, B 0x20}", vq[1].Value)
+	if !bytes.Equal(vq[1].Value, []byte{0x00, 0x0a, 0xe0, 0xc0}) {
+		t.Fatalf("802.1q VLAN 10 entry = % x, want {vlan 10, member 0xe0, tagged 0xc0} under the ROUND 19 wire model", vq[1].Value)
 	}
 	stored := agent.VLAN8021Q()
 	if len(stored) != 2 || stored[1] != (VLAN8021QEntry{VLANID: 10, Tagged: 0xc0, Untagged: 0x20}) {
-		t.Fatalf("agent 802.1q state = %#v, want VLAN 10 {Tagged 0xc0, Untagged 0x20} stored verbatim", stored)
+		t.Fatalf("agent 802.1q state = %#v, want VLAN 10 {Tagged 0xc0, Untagged 0x20} as the logical parsed sets", stored)
 	}
 }
 
 // assert8021QRoundTrip exercises the typed table surfaces: the
-// Set8021QVLAN/Get8021QVLANs round-trip (GAP-1 default roles), the
-// SetPVID/GetPVIDs round-trip, Delete8021QVLAN, and the live-proven
-// idempotent re-delete. The probe shape mirrors nsdp-gaps.sh stage 2
-// (asymmetric membership: port 3 tagged, port 5 untagged on VLAN 999).
-// Ends with the table back at factory state.
+// Set8021QVLAN/Get8021QVLANs round-trip (ROUND 19 member/tagged wire
+// model), the SetPVID/GetPVIDs round-trip, Delete8021QVLAN, and the
+// live-proven idempotent re-delete. The probe shape mirrors nsdp-gaps.sh
+// stage 2 (asymmetric membership: port 3 tagged, port 5 untagged on
+// VLAN 999). Ends with the table back at factory state.
 func assert8021QRoundTrip(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 	t.Helper()
 	if err := c.Set8021QVLAN(999, []int{3}, []int{5}); err != nil {
@@ -448,26 +449,29 @@ func assert8021QRoundTrip(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 	}
 }
 
-// assertRoleMismatchVisibility proves the GAP-1 adversarial world is
-// OBSERVABLE at the library boundary: with the fake's reply encoder
-// swapping the 0x2800 role bytes (Reply8021QRolesSwapped),
-// Get8021QVLANs returns roles that DISAGREE with what was written.
+// assertMembershipDropVisibility replays the REAL firmware behavior
+// observed on the casalta GS108Ev3 (ROUND 19, 2026-09-12): with the
+// fake's Reply8021QMembershipDropped knob set, a 0x2800 SET replies OK
+// but the VLAN is stored with EMPTY membership — so Get8021QVLANs
+// reports a membership that DISAGREES with what was written.
 //
-// CONTRACT: a verify-corrective layer built on this surface can convert
-// that disagreement into a typed drift error — the role mismatch can
-// never masquerade as silent success, because the readback visibly
-// contradicts the write. Ends with the knob cleared and VLAN 999 gone.
-func assertRoleMismatchVisibility(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
+// CONTRACT: a verify-corrective layer built on this surface converts
+// that disagreement into a typed drift error — the silent membership
+// drop can never masquerade as a successful apply, because the
+// readback visibly contradicts the write. Ends with the knob cleared
+// and VLAN 999 gone.
+func assertMembershipDropVisibility(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
 	t.Helper()
-	if err := c.Set8021QVLAN(999, []int{3}, []int{5}); err != nil {
-		t.Fatalf("Set8021QVLAN(999, [3], [5]): %v", err)
-	}
-	agent.Reply8021QRolesSwapped = true
-	defer func() { agent.Reply8021QRolesSwapped = false }()
+	agent.Reply8021QMembershipDropped = true
+	defer func() { agent.Reply8021QMembershipDropped = false }()
 
+	// The corrected stage-2 probe shape: members {3,5}, tagged {3}.
+	if err := c.Set8021QVLAN(999, []int{3}, []int{5}); err != nil {
+		t.Fatalf("Set8021QVLAN(999, [3], [5]) under the drop knob: %v", err)
+	}
 	table, err := c.Get8021QVLANs()
 	if err != nil {
-		t.Fatalf("Get8021QVLANs (swapped-roles reply): %v", err)
+		t.Fatalf("Get8021QVLANs (dropped membership): %v", err)
 	}
 	var m *nsdp.VLAN8021QMembership
 	for i := range table {
@@ -476,19 +480,16 @@ func assertRoleMismatchVisibility(t *testing.T, agent *FakeAgent, c *nsdp.Client
 		}
 	}
 	if m == nil {
-		t.Fatalf("VLAN 999 missing from the swapped-roles read: %+v", table)
+		t.Fatalf("VLAN 999 missing from the dropped-membership read: %+v", table)
 	}
-	// WROTE Tagged={3} (0x20), Untagged={5} (0x08); the swapped reply
-	// must decode to the exact OPPOSITE roles — the disagreement is the
-	// observable signal a drift detector needs.
-	if m.Tagged == nsdp.PortBitmap([]int{3}) && m.Untagged == nsdp.PortBitmap([]int{5}) {
-		t.Fatalf("swapped-roles reply decoded to the WRITTEN roles %+v — the mismatch is NOT observable (knob broken?)", *m)
+	// WROTE Tagged={3} (0x20), Untagged={5} (0x08); the drop must report
+	// the VLAN present but EMPTY — the disagreement is the observable
+	// signal a drift detector needs.
+	if m.Tagged != 0x00 || m.Untagged != 0x00 {
+		t.Fatalf("dropped-membership read = %+v, want VLAN 999 present with empty membership (Tagged 0x00, Untagged 0x00)", *m)
 	}
-	if m.Tagged != nsdp.PortBitmap([]int{5}) || m.Untagged != nsdp.PortBitmap([]int{3}) {
-		t.Fatalf("swapped-roles reply decoded to %+v, want the written roles exchanged (Tagged 0x08, Untagged 0x20)", *m)
-	}
-	// The stored state still holds exactly what the SET applied
-	// (tagged-first): the disagreement is purely reply encoding.
+	// The stored state holds the dropped (empty) entry — exactly what
+	// the real switch kept: the VLAN id, minus the membership.
 	stored := agent.VLAN8021Q()
 	var s *VLAN8021QEntry
 	for i := range stored {
@@ -496,12 +497,15 @@ func assertRoleMismatchVisibility(t *testing.T, agent *FakeAgent, c *nsdp.Client
 			s = &stored[i]
 		}
 	}
-	if s == nil || s.Tagged != nsdp.PortBitmap([]int{3}) || s.Untagged != nsdp.PortBitmap([]int{5}) {
-		t.Fatalf("agent stored state = %+v, want VLAN 999 {Tagged 0x20, Untagged 0x08} as applied", stored)
+	if s == nil || s.Tagged != 0x00 || s.Untagged != 0x00 {
+		t.Fatalf("agent stored state = %+v, want VLAN 999 stored empty (id kept, membership dropped)", stored)
 	}
 
-	// Knob cleared: reads agree with the written roles again (recovery).
-	agent.Reply8021QRolesSwapped = false
+	// Knob cleared: the SET lands as written again (recovery).
+	agent.Reply8021QMembershipDropped = false
+	if err := c.Set8021QVLAN(999, []int{3}, []int{5}); err != nil {
+		t.Fatalf("Set8021QVLAN(999, [3], [5]) after knob cleared: %v", err)
+	}
 	table, err = c.Get8021QVLANs()
 	if err != nil {
 		t.Fatalf("Get8021QVLANs (knob cleared): %v", err)
@@ -512,7 +516,7 @@ func assertRoleMismatchVisibility(t *testing.T, agent *FakeAgent, c *nsdp.Client
 		}
 	}
 	if m == nil || m.Tagged != nsdp.PortBitmap([]int{3}) || m.Untagged != nsdp.PortBitmap([]int{5}) {
-		t.Fatalf("VLAN 999 after knob cleared = %+v, want the written roles back (Tagged 0x20, Untagged 0x08)", table)
+		t.Fatalf("VLAN 999 after knob cleared = %+v, want the written membership back (Tagged 0x20, Untagged 0x08)", table)
 	}
 	if err := c.Delete8021QVLAN(999); err != nil {
 		t.Fatalf("Delete8021QVLAN(999) cleanup: %v", err)
@@ -622,9 +626,9 @@ func Test8021QVLANRoundTrip(t *testing.T) {
 	assert8021QRoundTrip(t, agent, c)
 }
 
-func Test8021QRoleMismatchVisibility(t *testing.T) {
+func Test8021QMembershipDropVisibility(t *testing.T) {
 	agent, c := startClient(t, Options{Password: "hunter2"})
-	assertRoleMismatchVisibility(t, agent, c)
+	assertMembershipDropVisibility(t, agent, c)
 }
 
 // TestIdentityReadBack scripts a full identity and reads it back over
