@@ -33,6 +33,9 @@ resource "netgear_plus_vlan_state" "switch" {
     ports = {
       "1" = "untagged"
       "2" = "untagged"
+      "5" = "untagged"
+      "6" = "untagged"
+      "7" = "untagged"
       "8" = "tagged"
     }
   }
