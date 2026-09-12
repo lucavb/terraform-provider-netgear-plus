@@ -1,0 +1,42 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-09-12",
+  "dependencies": [
+    {
+      "name": "py-netgear-plus",
+      "resolvedVersion": "v0.6.4",
+      "repoUrl": "https://github.com/foxey/py-netgear-plus.git",
+      "ref": "v0.6.4",
+      "path": ".slim/clonedeps/repos/foxey__py-netgear-plus",
+      "packagePath": "src/py_netgear_plus",
+      "reason": "Python reference implementation for NETGEAR Plus switches: HTTP UI session/login flow, switch state reads, possible config backup/restore. Fetched as source tarball from codeload.github.com (sandbox denies git HTTPS helper; no .git history)."
+    },
+    {
+      "name": "ha-netgear-plus",
+      "resolvedVersion": "main",
+      "repoUrl": "https://github.com/ckarrie/ha-netgear-plus.git",
+      "ref": "main",
+      "path": ".slim/clonedeps/repos/ckarrie__ha-netgear-plus",
+      "packagePath": "custom_components",
+      "reason": "Home Assistant custom integration (HACS) for Netgear Plus switches: consumer-side view of py-netgear-plus (session lifecycle, polling, device modeling). Source tarball, no .git history."
+    },
+    {
+      "name": "terraform-provider-unifi",
+      "resolvedVersion": "main",
+      "repoUrl": "https://github.com/paultyng/terraform-provider-unifi.git",
+      "ref": "main",
+      "path": ".slim/clonedeps/repos/paultyng__terraform-provider-unifi",
+      "packagePath": "internal",
+      "reason": "Terraform provider for UniFi (archived upstream): pattern reference for session-based providers, resource granularity, drift handling. vendor/ tree removed (partial extraction caused by sandbox secret-path filter). Source tarball, no .git history."
+    },
+    {
+      "name": "terraform-provider-routeros",
+      "resolvedVersion": "main",
+      "repoUrl": "https://github.com/terraform-routeros/terraform-provider-routeros.git",
+      "ref": "main",
+      "path": ".slim/clonedeps/repos/terraform-routeros__terraform-provider-routeros",
+      "packagePath": "",
+      "reason": "Active Terraform provider for MikroTik RouterOS: pattern reference for network-device CRUD, session/connection reuse, error taxonomies. Source tarball, no .git history."
+    }
+  ]
+}

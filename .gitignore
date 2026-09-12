@@ -2,6 +2,7 @@ captures/
 dist/
 coverage/
 __pycache__/
+*.cfg
 examples/live-test/
 examples/live-test/.terraform/
 examples/live-test/.terraform.lock.hcl
@@ -11,3 +12,16 @@ examples/live-test/*.tfstate
 examples/live-test/*.tfstate.*
 examples/live-test/*.tfvars
 examples/live-test/*.sops.yaml
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps
+
+# Patched firmware outputs (patch_lockout.py)
+*_patched.bin
+
+# Firmware images (re-downloadable from NETGEAR; keep binaries out of the repo)
+GS108Ev3*.zip
+
+# Ghidra reverse-engineering workspace (local analysis scratch)
+ghidra.*
