@@ -525,14 +525,12 @@ func acceptanceNSDPProviderData(t *testing.T) *providerData {
 // TestAccVLANStateNSDPResource is the NSDP 802.1Q write acceptance
 // skeleton.
 //
-// ⚠️ The extra NETGEAR_PLUS_ACC_8021Q_NSDP=1 gate stays in place until
-// the corrected 0x2800 write path (ROUND 19 member/tagged payload,
-// 2026-09-12) is proven on hardware in a full acceptance run. GAP-1 is
-// RESOLVED (member/tagged wire model; untagged derived) and
-// SetPVID/Delete8021QVLAN are live-proven — the remaining unknown is
-// end-to-end convergence, and the verify-corrective spine turns any
-// residual write-path surprise into a typed drift error, not silent
-// corruption.
+// The corrected 0x2800 write path (ROUND 19 member/tagged payload,
+// 2026-09-12) passed the full hardware acceptance run on 2026-09-12:
+// create, read, update, verify, and delete all green against the
+// GS108Ev3 (fw 2.06.24) through the provider CRUD spine. The extra
+// NETGEAR_PLUS_ACC_8021Q_NSDP=1 opt-in gate is therefore gone — this
+// test runs under plain TF_ACC like the rest of the hardware suite.
 //
 // Sacrificial discipline, identical to nsdp-gaps.sh: VLAN 999 and free
 // ports 3/5 ONLY; the PVID change is on port 3 ONLY; ports 1, 2, and 8
@@ -541,9 +539,6 @@ func acceptanceNSDPProviderData(t *testing.T) *providerData {
 func TestAccVLANStateNSDPResource(t *testing.T) {
 	if os.Getenv("TF_ACC") == "" {
 		t.Skip("TF_ACC not set: skipping NSDP hardware acceptance test")
-	}
-	if os.Getenv("NETGEAR_PLUS_ACC_8021Q_NSDP") != "1" {
-		t.Skip("NETGEAR_PLUS_ACC_8021Q_NSDP != 1: 802.1Q NSDP writes stay gated until the corrected ROUND 19 write path passes a full hardware acceptance run")
 	}
 
 	data := acceptanceNSDPProviderData(t)
