@@ -16,6 +16,7 @@
 // Flags (must precede the subcommand):
 //
 //	-agent-mac string  target switch MAC, e.g. 8c:3b:ad:25:1b:88 (required for login and set-name)
+//	-dest string       unicast NSDP destination host[:port] (default: broadcast 255.255.255.255:63322)
 //	-iface string      network interface to use (default: first non-loopback interface with a hardware address, lowest index)
 //	-password string   switch admin password (required for login and set-name)
 //	-verbose           print the NSDP exchange (capability/nonce/token, retries, dropped packets, request bytes)
@@ -50,6 +51,7 @@ func main() {
 	agentFlag := flag.String("agent-mac", "", "target switch MAC, e.g. 8c:3b:ad:25:1b:88 (required for login and set-name)")
 	passwordFlag := flag.String("password", "", "switch admin password (required for login and set-name)")
 	verboseFlag := flag.Bool("verbose", false, "print the NSDP exchange: capability/nonce/token, retries, dropped packets, request bytes")
+	flag.StringVar(&destFlag, "dest", "", "unicast NSDP destination host[:port] (default: broadcast 255.255.255.255:63322)")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -237,6 +239,7 @@ func usage() {
 flags (must precede the subcommand):
   -agent-mac string   target switch MAC, e.g. 8c:3b:ad:25:1b:88 (required for login, set-name;
                       required for all write operations)
+  -dest string        unicast NSDP destination host[:port] (default: broadcast 255.255.255.255:63322)
   -iface string       network interface (default: first non-loopback with a hardware address, lowest index)
   -password string    switch admin password (required for login, set-name and all write operations)
   -verbose            print the NSDP exchange: capability/nonce/token, retries, request bytes
@@ -246,12 +249,18 @@ they print a lockout warning and can misconfigure a real switch.
 `)
 }
 
+// destFlag holds the -dest flag value: optional unicast NSDP destination
+// host[:port], empty = the default limited-broadcast. A package-level var
+// because every cmd* funnels through the shared newClient below.
+var destFlag string
+
 // newClient wires the flags into nsdp.NewClient.
 func newClient(iface, agent, password string, verbose io.Writer) (*nsdp.Client, error) {
 	return nsdp.NewClient(nsdp.Options{
 		IfaceName: iface,
 		AgentMAC:  agent,
 		Password:  []byte(password),
+		Dest:      destFlag,
 		Verbose:   verbose,
 	})
 }

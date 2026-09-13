@@ -462,3 +462,43 @@ func TestSetSystemNameRejectedNoAuth(t *testing.T) {
 		t.Fatalf("rejected login must not apply the name: sim name = %q", sim.name)
 	}
 }
+
+// TestResolveDest pins the Options.Dest resolution rules: empty = the
+// default limited-broadcast (today's behavior), bare host = host with the
+// v2 switch port appended, host:port passthrough, and udp4 enforcement.
+func TestResolveDest(t *testing.T) {
+	tests := []struct {
+		name    string
+		dest    string
+		want    *net.UDPAddr
+		wantErr bool
+	}{
+		{"empty = default broadcast", "", &net.UDPAddr{IP: net.IPv4(255, 255, 255, 255), Port: serverPort}, false},
+		{"bare host gets port 63322", "192.168.0.2", &net.UDPAddr{IP: net.IPv4(192, 168, 0, 2), Port: serverPort}, false},
+		{"host:port passthrough", "10.1.2.3:7000", &net.UDPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 7000}, false},
+		{"invalid port", "192.168.0.2:foo", nil, true},
+		{"non-udp4 address rejected", "fe80::1", nil, true},
+		{"invalid ipv4 octets", "300.1.2.3", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveDest(tt.dest)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveDest(%q) = %v, want error", tt.dest, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveDest(%q): %v", tt.dest, err)
+			}
+			udp, ok := got.(*net.UDPAddr)
+			if !ok {
+				t.Fatalf("resolveDest(%q) = %T, want *net.UDPAddr", tt.dest, got)
+			}
+			if !udp.IP.Equal(tt.want.IP) || udp.Port != tt.want.Port {
+				t.Fatalf("resolveDest(%q) = %v, want %v", tt.dest, udp, tt.want)
+			}
+		})
+	}
+}
