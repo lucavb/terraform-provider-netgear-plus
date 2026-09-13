@@ -123,6 +123,8 @@ The provider also intentionally waits `5s` between requests to the same switch b
 
 If your switch firmware is still touchy, raise the provider's `request_spacing` above `5` seconds. For example, `request_spacing = 10` is a reasonable debugging setting when you are trying to stay well clear of the lockout threshold.
 
+Request spacing alone cannot make the lockout impossible, though. When the switch rejects a login, the provider tries it up to three times in the same run before giving up, and every attempt counts toward the switch's lockout budget. That in-process failure counter resets in every fresh run, so repeated `tofu plan` or `tofu apply` invocations from CI or a wrapper script keep feeding the switch-side counter even with generous `request_spacing`.
+
 The switch can still report firmware lockouts if other clients are logging in at the same time, such as a browser session or another OpenTofu process. If that happens, wait for the lockout window to clear and retry with only one active client. While debugging, `tofu plan -parallelism=1` is a useful way to rule out unrelated concurrent activity.
 
 When debugging repeated lockouts, simplify the configuration to one read path at a time. Start with either `data.netgear_plus_switch.target` or `data.netgear_plus_vlan_state.current`, confirm that it succeeds consistently, and only then add the second data source or managed resource back in.
