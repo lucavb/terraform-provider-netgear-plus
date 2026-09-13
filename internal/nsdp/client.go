@@ -57,6 +57,14 @@ type Options struct {
 	AgentMAC string
 	// Password is the switch admin password, used by Login.
 	Password []byte
+	// Dest optionally targets a UNICAST NSDP destination instead of the
+	// default limited-broadcast, so NSDP can cross routed subnets toward
+	// the switch's routable IP. Empty = default limited-broadcast
+	// 255.255.255.255:63322 (behavior unchanged); non-empty = "host" or
+	// "host:port", with the port defaulting to 63322. The address must
+	// resolve as udp4. (Whether a given firmware accepts unicast NSDP is
+	// a device property; this option only sets the destination.)
+	Dest string
 	// Wait is the per-request response window. Zero = the 800ms default.
 	Wait time.Duration
 	// Verbose, when non-nil, receives the exchange log: retry notices,
@@ -110,14 +118,36 @@ func NewClient(opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nsdp: %w", err)
 	}
-	dst, err := net.ResolveUDPAddr("udp4", broadcastDest)
+	dst, err := resolveDest(opts.Dest)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("nsdp: resolve %s: %w", broadcastDest, err)
+		return nil, err
 	}
 	c := newClientOver(conn, iface.HardwareAddr, agentMAC, dst, opts.Password, opts.Wait, opts.Verbose)
 	c.iface = iface
 	return c, nil
+}
+
+// resolveDest resolves the Options.Dest destination into a udp4 address:
+// empty → the default limited-broadcast 255.255.255.255:63322, byte-for-byte
+// today's behavior; a bare host → host:63322; host:port → as given. The
+// result must resolve as udp4.
+func resolveDest(dest string) (net.Addr, error) {
+	if dest == "" {
+		dst, err := net.ResolveUDPAddr("udp4", broadcastDest)
+		if err != nil {
+			return nil, fmt.Errorf("nsdp: resolve %s: %w", broadcastDest, err)
+		}
+		return dst, nil
+	}
+	if _, _, err := net.SplitHostPort(dest); err != nil {
+		dest = net.JoinHostPort(dest, "63322")
+	}
+	dst, err := net.ResolveUDPAddr("udp4", dest)
+	if err != nil {
+		return nil, fmt.Errorf("nsdp: resolve destination %q: %w", dest, err)
+	}
+	return dst, nil
 }
 
 // NewClientWithConn returns a Client running over an injected connection
