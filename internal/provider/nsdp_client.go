@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/nsdp"
@@ -73,6 +74,24 @@ func normalizeAgentMAC(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+// nsdpDestHost normalizes the provider's host attribute into an NSDP
+// unicast destination (nsdp.Options.Dest). The host attribute accepts
+// "hostname or URL" (the HTTP driver parses URLs), so a URL form
+// contributes only its hostname; a bare host — optionally "host:port"
+// for a non-default NSDP port — passes through trimmed; empty stays
+// empty (limited-broadcast). A malformed URL passes through raw so the
+// nsdp package surfaces the resolution error itself.
+func nsdpDestHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" || !strings.Contains(host, "://") {
+		return host
+	}
+	if parsed, err := url.Parse(host); err == nil {
+		return parsed.Hostname()
+	}
+	return host
+}
+
 // nsdpClient returns the cached NSDP client for the current fingerprint,
 // building it on first use (lazily, mirroring driverForConfig). The same
 // fingerprint always yields the same instance: the nsdp client is NOT
@@ -104,11 +123,16 @@ func (d *providerData) nsdpClient(ctx context.Context) (nsdpClient, error) {
 	}
 
 	// An empty IfaceName keeps the nsdp package default: the first
-	// non-loopback interface with a hardware address.
+	// non-loopback interface with a hardware address. Dest mirrors the
+	// provider's host when both agent_mac and host are configured: the
+	// NSDP client unicasts to the switch's routable address instead of
+	// limited-broadcast (live-proven on the GS108Ev3, 2026-09-13). An
+	// empty host keeps the nsdp package's broadcast default.
 	client, err := factory(nsdp.Options{
 		IfaceName: d.ifaceName,
 		AgentMAC:  d.agentMAC,
 		Password:  []byte(d.config.Password),
+		Dest:      nsdpDestHost(d.config.Host),
 	})
 	if err != nil {
 		return nil, err
@@ -136,7 +160,13 @@ func (d *providerData) invalidateCachedNSDPClient() {
 }
 
 // nsdpConfigFingerprint tracks only the fields that shape the NSDP socket
-// and login: interface, normalized agent MAC, and password.
+// and login: interface, normalized agent MAC, password, and the NSDP
+// destination derived from host (nsdpDestHost). Host feeds the NSDP
+// client as the unicast destination when agent_mac is set, so a
+// destination change must rebuild the cached client — while host
+// spellings that resolve to the same destination (URL vs bare host)
+// deliberately share one fingerprint. Other HTTP-only config fields
+// (model, timeouts, insecure_http) never leak in here.
 func (d *providerData) nsdpConfigFingerprint() string {
 	if d == nil {
 		return ""
@@ -146,6 +176,7 @@ func (d *providerData) nsdpConfigFingerprint() string {
 		strings.TrimSpace(d.ifaceName),
 		normalizeAgentMAC(d.agentMAC),
 		strings.TrimSpace(d.config.Password),
+		nsdpDestHost(d.config.Host),
 	}, "\x00")
 }
 

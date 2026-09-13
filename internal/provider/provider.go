@@ -54,7 +54,7 @@ type providerData struct {
 	// NSDP plumbing (see nsdp_client.go). The NSDP client lifecycle is
 	// independent of the HTTP driver session above.
 	agentMAC    string // normalized (trimmed, lowercased) switch MAC; "" = unset
-	ifaceName   string // NSDP broadcast interface name; "" = nsdp package default
+	ifaceName   string // NSDP source interface; "" = nsdp package default
 	deviceKey   string // unified mutex/pacer key, precomputed at Configure time
 	nsdpFactory func(nsdp.Options) (nsdpClient, error)
 	cachedNSDP  *cachedNSDPClient
@@ -106,18 +106,18 @@ func (p *netgearPlusProvider) Schema(_ context.Context, _ provider.SchemaRequest
 		Attributes: map[string]pschema.Attribute{
 			"host": pschema.StringAttribute{
 				Optional:    true,
-				Description: "Switch hostname or URL. Required by web UI (HTTP) resources and data sources; may be omitted when only NSDP (`agent_mac`) resources are used. At least one of `host` or `agent_mac` must be set.",
+				Description: "Switch hostname or URL. Without `agent_mac` it targets the switch web UI (HTTP driver) and is required by the HTTP resources and data sources. With `agent_mac` also set, it becomes the NSDP unicast destination instead: NSDP requests are sent unicast to this address (default port 63322) rather than limited-broadcast, so the switch is reachable across routed subnets. At least one of `host` or `agent_mac` must be set.",
 			},
 			"agent_mac": pschema.StringAttribute{
 				Optional:    true,
-				Description: "Switch (agent) MAC address for NSDP, e.g. 8c:3b:ad:25:1b:88. Required by NSDP resources; at least one of `host` or `agent_mac` must be set.",
+				Description: "Switch (agent) MAC address for NSDP, e.g. 8c:3b:ad:25:1b:88. Required by NSDP resources; at least one of `host` or `agent_mac` must be set. Without `host`, NSDP uses limited-broadcast and the local machine must be L2-adjacent to the switch; with `host` also set, NSDP is sent unicast to that address (routed subnets OK).",
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(agentMACPattern, "must be a colon-separated MAC address, e.g. 8c:3b:ad:25:1b:88"),
 				},
 			},
 			"interface": pschema.StringAttribute{
 				Optional:    true,
-				Description: "Local network interface used for NSDP broadcast traffic (e.g. en0). If unset, the first non-loopback interface with a hardware address is used.",
+				Description: "Local network interface used for NSDP traffic (e.g. en0) — the source interface (and manager MAC) for broadcast or unicast requests. If unset, the first non-loopback interface with a hardware address is used.",
 			},
 			"password": pschema.StringAttribute{
 				Required:    true,
@@ -267,6 +267,11 @@ func (p *netgearPlusProvider) DataSources(_ context.Context) []func() datasource
 //     the nsdp_client.go client cache, and the retry-once-on-auth-
 //     failure rule. Preferred when both agent_mac and host are
 //     configured — this must be called out in the provider docs.
+//     Within this branch, host picks the NSDP destination: host set ->
+//     UNICAST to the host's address (nsdp Options.Dest via
+//     nsdpDestHost; routed subnets OK, live-proven on the GS108Ev3
+//     2026-09-13); host unset -> limited-broadcast, so the local
+//     machine must be L2-adjacent to the switch.
 //   - agent_mac unset, host set  -> HTTP adapter, byte-identical to the
 //     pre-dual-transport behavior (session cache, invalidation on
 //     ShouldInvalidateSession).

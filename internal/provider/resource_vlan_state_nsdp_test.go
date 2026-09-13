@@ -511,8 +511,15 @@ func acceptanceNSDPProviderData(t *testing.T) *providerData {
 		t.Skip("NETGEAR_PLUS_AGENT_MAC / NETGEAR_PLUS_PASSWORD not set: skipping NSDP hardware acceptance test")
 	}
 
+	// Optional: with NETGEAR_PLUS_HOST set, NSDP runs unicast to the
+	// switch's routable address (host + agent_mac semantics) instead of
+	// limited-broadcast — enables hardware acceptance runs from a
+	// remote subnet. Unset keeps today's broadcast behavior.
+	host := strings.TrimSpace(os.Getenv("NETGEAR_PLUS_HOST"))
+
 	return &providerData{
 		config: client.Config{
+			Host:           host,
 			Password:       password,
 			RequestSpacing: defaultRequestSpacing,
 		},

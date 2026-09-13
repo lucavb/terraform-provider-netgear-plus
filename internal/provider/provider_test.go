@@ -875,6 +875,78 @@ func TestNSDPClientPreservesEmptyInterfaceDefault(t *testing.T) {
 	}
 }
 
+func TestNSDPDestHost(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"empty stays empty (broadcast)", "", ""},
+		{"whitespace-only stays empty", "   ", ""},
+		{"bare host passes through trimmed", "10.0.2.2", "10.0.2.2"},
+		{"bare host is trimmed", "  10.0.2.2  ", "10.0.2.2"},
+		{"host:port passes through (non-default NSDP port)", "10.0.2.2:63323", "10.0.2.2:63323"},
+		{"URL contributes hostname only", "http://10.0.2.2", "10.0.2.2"},
+		{"URL with port contributes hostname only", "http://10.0.2.2:80", "10.0.2.2"},
+		{"https URL contributes hostname only", "https://switch.lan:8443/", "switch.lan"},
+		{"URL is trimmed before parsing", " http://10.0.2.2 ", "10.0.2.2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := nsdpDestHost(tc.host); got != tc.want {
+				t.Fatalf("nsdpDestHost(%q) = %q, want %q", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNSDPClientUnicastDestWiring pins the host + agent_mac semantics at
+// the real construction site: the NSDP client factory receives
+// Options.Dest from the provider's host value when both are configured,
+// and an empty Dest (limited-broadcast) when only agent_mac is set.
+func TestNSDPClientUnicastDestWiring(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		host     string
+		wantDest string
+	}{
+		{"host and agent_mac set: unicast destination from bare host", "10.0.2.2", "10.0.2.2"},
+		{"host and agent_mac set: URL form contributes hostname only", "http://10.0.2.2:80", "10.0.2.2"},
+		{"agent_mac only: empty Dest keeps limited-broadcast", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotOpts []nsdp.Options
+			data := &providerData{
+				config:   client.Config{Host: tc.host, Password: "secret"},
+				agentMAC: "8c:3b:ad:25:1b:88",
+				nsdpFactory: func(opts nsdp.Options) (nsdpClient, error) {
+					gotOpts = append(gotOpts, opts)
+					return &stubNSDPClient{}, nil
+				},
+			}
+
+			if _, err := data.nsdpClient(context.Background()); err != nil {
+				t.Fatalf("nsdpClient() error = %v", err)
+			}
+			if len(gotOpts) != 1 {
+				t.Fatalf("nsdpFactory call count = %d, want 1", len(gotOpts))
+			}
+			if gotOpts[0].Dest != tc.wantDest {
+				t.Fatalf("nsdpFactory Dest = %q, want %q", gotOpts[0].Dest, tc.wantDest)
+			}
+		})
+	}
+}
+
 func TestNSDPClientFingerprintIndependentOfHTTPConfig(t *testing.T) {
 	t.Parallel()
 
@@ -889,16 +961,30 @@ func TestNSDPClientFingerprintIndependentOfHTTPConfig(t *testing.T) {
 	// HTTP-only config fields must not leak into the NSDP fingerprint:
 	// the NSDP client cache lifecycle is independent of the HTTP driver
 	// session.
-	data.config.Host = "http://192.0.2.99"
 	data.config.Model = client.ModelGS108Ev3
 	data.config.RequestTimeout = 99
 	if second := data.nsdpConfigFingerprint(); first != second {
 		t.Fatalf("NSDP fingerprint must not track HTTP config fields: %q != %q", first, second)
 	}
 
+	// Host is NO LONGER HTTP-only: it feeds the NSDP unicast destination
+	// when agent_mac is set, so a destination change must rebuild the
+	// cached client (different fingerprint)...
+	data.config.Host = "http://192.0.2.99"
+	if third := data.nsdpConfigFingerprint(); first == third {
+		t.Fatal("NSDP fingerprint must change when the host-derived NSDP destination changes")
+	}
+
+	// ...while host spellings that resolve to the same destination
+	// deliberately share one fingerprint.
+	data.config.Host = "192.0.2.10"
+	if fourth := data.nsdpConfigFingerprint(); fourth != first {
+		t.Fatalf("URL and bare-host spellings of the same NSDP destination must share a fingerprint: %q != %q", fourth, first)
+	}
+
 	// The interface IS part of the fingerprint.
 	data.ifaceName = "en1"
-	if third := data.nsdpConfigFingerprint(); first == third {
+	if fifth := data.nsdpConfigFingerprint(); first == fifth {
 		t.Fatal("NSDP fingerprint must change when the interface changes")
 	}
 }
