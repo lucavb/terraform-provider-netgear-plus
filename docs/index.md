@@ -21,7 +21,7 @@ Use the fully qualified source address in OpenTofu:
 ```hcl
 terraform {
   required_providers {
-    netgear_plus = {
+    netgear = {
       source = "registry.terraform.io/lucavb/netgear-plus"
     }
   }
@@ -35,13 +35,13 @@ Terraform can also use the shorthand source `lucavb/netgear-plus`.
 ```hcl
 terraform {
   required_providers {
-    netgear_plus = {
+    netgear = {
       source = "registry.terraform.io/lucavb/netgear-plus"
     }
   }
 }
 
-provider "netgear_plus" {
+provider "netgear" {
   host            = "192.0.2.10"
   password        = var.switch_password
   request_spacing = 5

@@ -24,7 +24,7 @@ Use the fully qualified provider source for OpenTofu:
 ```hcl
 terraform {
   required_providers {
-    netgear_plus = {
+    netgear = {
       source = "registry.terraform.io/lucavb/netgear-plus"
     }
   }
@@ -34,7 +34,7 @@ terraform {
 Terraform CLI can also use the shorthand source `lucavb/netgear-plus`.
 
 ```hcl
-provider "netgear_plus" {
+provider "netgear" {
   host            = "192.0.2.10"
   password        = var.switch_password
   request_spacing = 5
