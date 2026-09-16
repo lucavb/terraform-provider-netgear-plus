@@ -126,9 +126,9 @@ func (p *netgearPlusProvider) Schema(_ context.Context, _ provider.SchemaRequest
 			},
 			"model": pschema.StringAttribute{
 				Optional:    true,
-				Description: "Switch model to bind to.",
+				Description: "Switch model to bind to: 'gs108ev3' (Plus line, HTTP web UI + NSDP v2) or 'gs108tv2' (GS108Tv2/GS110TPv2-class FASTPATH line, NSDP v1 only — requires agent_mac; no web-UI transport exists).",
 				Validators: []validator.String{
-					stringvalidator.OneOf(client.ModelGS108Ev3),
+					stringvalidator.OneOf(client.ModelGS108Ev3, client.ModelGS108Tv2),
 				},
 			},
 			"request_timeout": pschema.Int64Attribute{
@@ -249,6 +249,7 @@ func (p *netgearPlusProvider) Resources(_ context.Context) []func() resource.Res
 func (p *netgearPlusProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewSwitchDataSource,
+		NewSwitchConfigDataSource,
 		NewVLANStateDataSource,
 	}
 }
@@ -293,6 +294,15 @@ func withSwitchTransport(ctx context.Context, data *providerData, fn func(switch
 
 	if strings.TrimSpace(data.config.Host) == "" {
 		return fmt.Errorf("HTTP resources require the provider attribute host")
+	}
+
+	// gs108tv2 (FASTPATH/NSDP v1) has no web-UI transport at all: its
+	// firmware HTML is unrelated to the gs108ev3 Plus pages, so an
+	// HTTP-only configuration would fail later with a confusing
+	// "unsupported model" driver error. Fail here with the provenance
+	// remedy instead.
+	if strings.EqualFold(strings.TrimSpace(data.config.Model), client.ModelGS108Tv2) {
+		return fmt.Errorf("model %s is NSDP-only (its firmware has no Plus-line web UI): configure the provider attribute agent_mac instead of (or in addition to) host", client.ModelGS108Tv2)
 	}
 
 	key := data.deviceLockKey()
