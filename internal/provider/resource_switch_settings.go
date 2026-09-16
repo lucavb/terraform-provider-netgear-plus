@@ -144,6 +144,9 @@ func (r *switchSettingsResource) Read(ctx context.Context, req resource.ReadRequ
 	}
 
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
+		if err := nsdpV1Guard(c, "Global switch settings (QoS mode, multicast blocking, mirroring)"); err != nil {
+			return err
+		}
 		actual, err := readSwitchSettings(c)
 		if err != nil {
 			return operationError("Read switch settings failed", err)
@@ -204,6 +207,9 @@ func (r *switchSettingsResource) apply(ctx context.Context, plan switchSettingsR
 	}
 
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
+		if err := nsdpV1Guard(c, "Global switch settings (QoS mode, multicast blocking, mirroring)"); err != nil {
+			return err
+		}
 		actual, err := readSwitchSettings(c)
 		if err != nil {
 			return operationError("Read current switch settings failed", err)

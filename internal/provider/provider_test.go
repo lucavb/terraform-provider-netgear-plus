@@ -557,6 +557,7 @@ func (c *stubNSDPClient) SetPortBasedVLAN(int, []int) error   { return nil }
 func (c *stubNSDPClient) Get8021QVLANs() ([]nsdp.VLAN8021QMembership, error) {
 	return nil, nil
 }
+func (c *stubNSDPClient) IsV1() bool                          { return false }
 func (c *stubNSDPClient) GetPVIDs() ([]nsdp.PVIDEntry, error) { return nil, nil }
 func (c *stubNSDPClient) GetIdentity() (nsdp.SwitchIdentity, error) {
 	return nsdp.SwitchIdentity{}, nil
@@ -960,12 +961,25 @@ func TestNSDPClientFingerprintIndependentOfHTTPConfig(t *testing.T) {
 
 	// HTTP-only config fields must not leak into the NSDP fingerprint:
 	// the NSDP client cache lifecycle is independent of the HTTP driver
-	// session.
+	// session. The model is no longer purely HTTP-only — it selects the
+	// NSDP dialect (LegacyV1 port pair and request semantics for
+	// gs108tv2) — but the gs108ev3 model and the empty (default v2)
+	// model must resolve to the SAME v2 client: neither flips the
+	// dialect.
 	data.config.Model = client.ModelGS108Ev3
 	data.config.RequestTimeout = 99
 	if second := data.nsdpConfigFingerprint(); first != second {
-		t.Fatalf("NSDP fingerprint must not track HTTP config fields: %q != %q", first, second)
+		t.Fatalf("NSDP fingerprint must not track HTTP config fields (gs108ev3 model = default v2 dialect): %q != %q", first, second)
 	}
+
+	// The dialect selection IS part of the fingerprint: switching the
+	// model to gs108tv2 rebuilds the cached client, so a live-logged-in
+	// v2 session can never be reused against a v1 switch silently.
+	data.config.Model = client.ModelGS108Tv2
+	if v1 := data.nsdpConfigFingerprint(); v1 == first {
+		t.Fatal("NSDP fingerprint must change when the model switches the NSDP dialect to gs108tv2")
+	}
+	data.config.Model = ""
 
 	// Host is NO LONGER HTTP-only: it feeds the NSDP unicast destination
 	// when agent_mac is set, so a destination change must rebuild the

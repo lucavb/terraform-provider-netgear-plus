@@ -35,14 +35,34 @@ type SwitchIdentity struct {
 // (block 0x78, tag 0x7800). Absent reply TLVs decode as zero values
 // (the switch decides what it answers); transport failures return an
 // error.
+//
+// v1 dialect (c.v1, e.g. GS108Tv2 5.4.2.36): GetAttrs fans out to
+// sequential single-attr GETs automatically, and the serial comes from
+// the flat ASCII TLV 0x0019 instead of the v2 identity block — block
+// requests are structurally impossible on v1 (tags ≥ 0x0400 are
+// rejected by the switch's reply decoder). Serial absent → empty
+// string, not an error.
 func (c *Client) GetIdentity() (SwitchIdentity, error) {
-	attrs, err := c.GetAttrs(
+	// v1: the serial rides on the same sequential fan-out (flat TLV
+	// 0x0019); v2: the extra 0x0019 request would hit an unknown-tag
+	// path, so only the classic five tags go out.
+	tags := []byte{
 		byte(TagProductName),
 		byte(TagModelCode),
 		byte(TagSystemName),
 		byte(TagFirmware1),
 		byte(TagFirmware2),
-	)
+	}
+	if c.v1 {
+		// v1 also carries the ACTIVE firmware bank (tag 0x000f): unlike
+		// the v2 Plus layout, bank 1 is not guaranteed to be the
+		// running image — live GS108Tv2 5.4.2.36: 0x000d = "5.4.2.30"
+		// (dormant), 0x000e = "5.4.2.36" (active, 0x000f = 2). The
+		// version facts must follow the RUNNING image, so the active
+		// bank selector decides which bank string is firmwareVersion.
+		tags = append(tags, byte(TagActiveImage), byte(TagSerialLegacyV1))
+	}
+	attrs, err := c.GetAttrs(tags...)
 	if err != nil {
 		return SwitchIdentity{}, fmt.Errorf("nsdp: read identity tags: %w", err)
 	}
@@ -60,6 +80,42 @@ func (c *Client) GetIdentity() (SwitchIdentity, error) {
 		id.FirmwareVersion = asciiTrim(fw)
 	} else if fw, ok := attrs[byte(TagFirmware2)]; ok && asciiTrim(fw) != "" {
 		id.FirmwareVersion = asciiTrim(fw)
+	}
+	if c.v1 {
+		if serial, ok := attrs[byte(TagSerialLegacyV1)]; ok {
+			id.SerialNumber = asciiTrim(serial)
+		}
+		// Active-bank-aware firmware version: prefer the bank the
+		// 0x000f byte names when it decodes to bank 1 or 2; fall back
+		// to the v2-style 0x000d-then-0x000e preference otherwise.
+		bank1 := ""
+		bank2 := ""
+		if fw, ok := attrs[byte(TagFirmware1)]; ok {
+			bank1 = asciiTrim(fw)
+		}
+		if fw, ok := attrs[byte(TagFirmware2)]; ok {
+			bank2 = asciiTrim(fw)
+		}
+		if active, ok := attrs[byte(TagActiveImage)]; ok && len(active) >= 1 {
+			switch active[0] & 0x0f {
+			case 1:
+				if bank1 != "" {
+					id.FirmwareVersion = bank1
+					return id, nil
+				}
+			case 2:
+				if bank2 != "" {
+					id.FirmwareVersion = bank2
+					return id, nil
+				}
+			}
+		}
+		if bank1 != "" {
+			id.FirmwareVersion = bank1
+		} else {
+			id.FirmwareVersion = bank2
+		}
+		return id, nil
 	}
 	serial, err := c.GetBlock(0x78, nil)
 	if err != nil {

@@ -52,6 +52,7 @@ func main() {
 	passwordFlag := flag.String("password", "", "switch admin password (required for login and set-name)")
 	verboseFlag := flag.Bool("verbose", false, "print the NSDP exchange: capability/nonce/token, retries, dropped packets, request bytes")
 	flag.StringVar(&destFlag, "dest", "", "unicast NSDP destination host[:port] (default: broadcast 255.255.255.255:63322)")
+	flag.BoolVar(&v1Flag, "v1", false, "legacy NSDP v1 port pair (bind 63323, switch-port 63324), e.g. GS108Tv2")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -243,6 +244,7 @@ flags (must precede the subcommand):
   -iface string       network interface (default: first non-loopback with a hardware address, lowest index)
   -password string    switch admin password (required for login, set-name and all write operations)
   -verbose            print the NSDP exchange: capability/nonce/token, retries, request bytes
+  -v1                 legacy v1 port pair (bind 63323, broadcast to 63324), e.g. GS108Tv2 5.4.2.36
 
 read-only subcommands (name/dump/get/block) never log in. All write operations require login:
 they print a lockout warning and can misconfigure a real switch.
@@ -254,15 +256,28 @@ they print a lockout warning and can misconfigure a real switch.
 // because every cmd* funnels through the shared newClient below.
 var destFlag string
 
+// v1Flag holds the -v1 flag: legacy NSDP v1 port pair (bind 63323, switch
+// port 63324). Same wire format, different ports.
+var v1Flag bool
+
 // newClient wires the flags into nsdp.NewClient.
 func newClient(iface, agent, password string, verbose io.Writer) (*nsdp.Client, error) {
-	return nsdp.NewClient(nsdp.Options{
+	opts := nsdp.Options{
 		IfaceName: iface,
 		AgentMAC:  agent,
 		Password:  []byte(password),
 		Dest:      destFlag,
 		Verbose:   verbose,
-	})
+	}
+	if v1Flag {
+		// Legacy v1 NSDP pair (GS108Tv2/GS110TPv2-era FASTPATH
+		// firmware): the client binds 63323 and the switch listens on
+		// 63324. Same wire format as the v2 pair — header, magic and
+		// TLVs are identical.
+		opts.ListenPort = 63323
+		opts.ServerPort = 63324
+	}
+	return nsdp.NewClient(opts)
 }
 
 // warnLockout mirrors the probe instrument's warning before any flow that

@@ -52,16 +52,17 @@ const (
 	// 0x000b = DHCP MODE enum: 0=Static, 1=DHCP, 2=Refresh DHCP
 	// (Wikipedia + ProSafeLinux + wireshark agree — corrects the old
 	// "port/link flag" mislabel).
-	TagDHCPMode      uint16 = 0x000b
-	TagScalar000c    uint16 = 0x000c // u8, name not pinned
-	TagFirmware1     uint16 = 0x000d // firmware image 1 string
-	TagFirmware2     uint16 = 0x000e // firmware image 2 string
-	TagActiveImage   uint16 = 0x000f // u8, low nibble = active image number
-	TagString0011    uint16 = 0x0011 // login info blob: live value is a nested-TLV composite {0x0014 cap} + {0x0017 nonce} + trailing
-	TagScalar0012    uint16 = 0x0012 // login composite marker (legacy name kept): empty, or the same nested composite as 0x0011
-	TagCapabilityTag uint16 = 0x0014 // BE32 capability word
-	TagNonceTag      uint16 = 0x0017 // raw 4-byte nonce
-	TagReboot        uint16 = 0x0013 // reboot action (SET-only; ProSafeLinux CMD_REBOOT + wireshark + ROUND 9 notes)
+	TagDHCPMode       uint16 = 0x000b
+	TagScalar000c     uint16 = 0x000c // u8, name not pinned
+	TagFirmware1      uint16 = 0x000d // firmware image 1 string
+	TagFirmware2      uint16 = 0x000e // firmware image 2 string
+	TagActiveImage    uint16 = 0x000f // u8, low nibble = active image number
+	TagString0011     uint16 = 0x0011 // login info blob: live value is a nested-TLV composite {0x0014 cap} + {0x0017 nonce} + trailing
+	TagScalar0012     uint16 = 0x0012 // login composite marker (legacy name kept): empty, or the same nested composite as 0x0011
+	TagCapabilityTag  uint16 = 0x0014 // BE32 capability word
+	TagNonceTag       uint16 = 0x0017 // raw 4-byte nonce
+	TagSerialLegacyV1 uint16 = 0x0019 // ASCII serial (v1 dialect, e.g. GS108Tv2 5.4.2.36: "129SM7B5U01DA7")
+	TagReboot         uint16 = 0x0013 // reboot action (SET-only; ProSafeLinux CMD_REBOOT + wireshark + ROUND 9 notes)
 )
 
 // Family/extended tags (0xNN00): NN is the block id.
@@ -166,6 +167,7 @@ var tagNames = map[uint16]string{
 	0x7000:                "igmp header validation",
 	TagFWConfigString:     "fw/config string",
 	TagSerialNumber:       "serial number",
+	TagSerialLegacyV1:     "serial number (v1 flat TLV)",
 	0x7c00:                "registration (1-byte SET toggle; firmware commits the 'registration' section)",
 	TagStaticRouterPort:   "fw image string (SET: igs static router port)",
 	0x8400:                "scalar 0x8400 (?)",

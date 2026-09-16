@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -65,8 +66,26 @@ type Options struct {
 	// resolve as udp4. (Whether a given firmware accepts unicast NSDP is
 	// a device property; this option only sets the destination.)
 	Dest string
+	// ListenPort optionally overrides the client-side UDP bind port.
+	// Zero = the standard 63321 (v2 pair). The legacy v1 switches
+	// (e.g. GS108Tv2 5.4.2.36, live-confirmed 2026-09-15) speak the same
+	// wire format but with the v1 pair: bind 63323, broadcast to 63324.
+	ListenPort int
+	// ServerPort optionally overrides the destination switch port used
+	// when Dest is unset (the broadcast default). Zero = the standard
+	// 63322 (v2 pair); 63324 for v1 switches.
+	ServerPort int
 	// Wait is the per-request response window. Zero = the 800ms default.
 	Wait time.Duration
+	// LegacyV1 switches the client to the NSDP v1 dialect (GS108Tv2 /
+	// GS110TPv2-class FASTPATH firmware, live-probed 2026-09-15): the
+	// v1 UDP port pair (63323 client / 63324 switch) — set implicitly
+	// when ListenPort/ServerPort overrides are given — single-attr GETs
+	// only (batched multi-tag GET requests go unanswered), no 0xNN00
+	// block reads, and a login that needs no nonce (capability word
+	// without bits 0x08/0x10 selects the plaintext/XORed-password auth
+	// TLV 0x000A; the switch rejects tags ≥ 0x0400 structurally).
+	LegacyV1 bool
 	// Verbose, when non-nil, receives the exchange log: retry notices,
 	// dropped packets, request bytes, and the login capability/nonce/
 	// token summary.
@@ -93,6 +112,24 @@ type Client struct {
 	capability uint32 // capability word V from the last successful Login
 	token      []byte // auth TLV value from the last successful Login
 	loggedIn   bool
+
+	// v1 marks the legacy NSDP v1 protocol level (ListenPort/ServerPort
+	// overrides, e.g. GS108Tv2 5.4.2.36): single-attr GETs only, no
+	// block reads, no nonce in the login flow (see Options.LegacyV1).
+	v1 bool
+}
+
+// IsV1 reports whether this client speaks the legacy v1 NSDP dialect
+// (ListenPort/ServerPort overrides, e.g. GS108Tv2 5.4.2.36): v1 switches
+// answer single-attr GETs and scalar TLVs only — 0xNN00 block requests
+// and multi-tag batch GETs are structurally impossible (the reply
+// decoder rejects any tag ≥ 0x0400, switchdrvr.bin 0x002a5xxx), so
+// callers must route to v1-capable paths instead.
+func (c *Client) IsV1() bool {
+	if c == nil {
+		return false
+	}
+	return c.v1
 }
 
 // NewClient resolves the local interface (and with it the manager MAC),
@@ -108,40 +145,80 @@ func NewClient(opts Options) (*Client, error) {
 	if len(iface.HardwareAddr) != 6 {
 		return nil, fmt.Errorf("nsdp: interface %q has no usable 6-byte hardware address", iface.Name)
 	}
+	// LegacyV1 implies the v1 port pair unless explicitly overridden:
+	// bind 63323, broadcast/unicast to 63324. This is the single flag
+	// callers (provider gs108tv2 model) need to set.
+	if opts.LegacyV1 {
+		if opts.ListenPort == 0 {
+			opts.ListenPort = 63323
+		}
+		if opts.ServerPort == 0 {
+			opts.ServerPort = 63324
+		}
+	}
 	var agentMAC net.HardwareAddr
 	if opts.AgentMAC != "" {
 		if agentMAC, err = net.ParseMAC(opts.AgentMAC); err != nil {
 			return nil, fmt.Errorf("nsdp: agent-mac %q: %w", opts.AgentMAC, err)
 		}
 	}
-	conn, _, err := listenUDP4(iface, clientPort)
+	listenPort := clientPort
+	if opts.ListenPort != 0 {
+		// Legacy v1 mode: the switch REPLY is a limited-broadcast
+		// datagram to <client-port> (live-confirmed: 10.0.2.8:63324 →
+		// 255.255.255.255:63323). Linux does not deliver directed
+		// broadcast datagrams to sockets bound to the interface's
+		// unicast address, so bind the wildcard address instead.
+		listenPort = opts.ListenPort
+		opts.LegacyV1 = true
+		conn, _, err := listenUDP4(nil, listenPort)
+		if err != nil {
+			return nil, fmt.Errorf("nsdp: %w", err)
+		}
+		dst, err := resolveDest(opts.Dest, opts.ServerPort)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		c := newClientOver(conn, iface.HardwareAddr, agentMAC, dst, opts.Password, opts.Wait, opts.Verbose)
+		c.iface = iface
+		c.v1 = opts.LegacyV1
+		return c, nil
+	}
+	conn, _, err := listenUDP4(iface, listenPort)
 	if err != nil {
 		return nil, fmt.Errorf("nsdp: %w", err)
 	}
-	dst, err := resolveDest(opts.Dest)
+	dst, err := resolveDest(opts.Dest, opts.ServerPort)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
 	c := newClientOver(conn, iface.HardwareAddr, agentMAC, dst, opts.Password, opts.Wait, opts.Verbose)
 	c.iface = iface
+	c.v1 = opts.LegacyV1
 	return c, nil
 }
 
 // resolveDest resolves the Options.Dest destination into a udp4 address:
-// empty → the default limited-broadcast 255.255.255.255:63322, byte-for-byte
-// today's behavior; a bare host → host:63322; host:port → as given. The
+// empty → the default limited-broadcast to the switch port (serverPort,
+// or Options.ServerPort override), byte-for-byte today's behavior for the
+// v2 pair; a bare host → host:<switch port>; host:port → as given. The
 // result must resolve as udp4.
-func resolveDest(dest string) (net.Addr, error) {
+func resolveDest(dest string, serverPortOverride int) (net.Addr, error) {
+	serverPort := serverPort
+	if serverPortOverride != 0 {
+		serverPort = serverPortOverride
+	}
 	if dest == "" {
-		dst, err := net.ResolveUDPAddr("udp4", broadcastDest)
+		dst, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("255.255.255.255:%d", serverPort))
 		if err != nil {
-			return nil, fmt.Errorf("nsdp: resolve %s: %w", broadcastDest, err)
+			return nil, fmt.Errorf("nsdp: resolve broadcast:%d: %w", serverPort, err)
 		}
 		return dst, nil
 	}
 	if _, _, err := net.SplitHostPort(dest); err != nil {
-		dest = net.JoinHostPort(dest, "63322")
+		dest = net.JoinHostPort(dest, strconv.Itoa(serverPort))
 	}
 	dst, err := net.ResolveUDPAddr("udp4", dest)
 	if err != nil {
@@ -150,24 +227,47 @@ func resolveDest(dest string) (net.Addr, error) {
 	return dst, nil
 }
 
+// ClientOption is a variadic tuning knob for NewClientWithConn — the
+// injected-connection seam's counterpart to the Options fields of
+// NewClient. Options are applied after the shared construction core, so
+// they override its defaults.
+type ClientOption func(*Client)
+
+// WithWait overrides the per-request response window (Options.Wait
+// semantics) on a client built over an injected connection. wait <= 0
+// keeps the 800ms default. Failure-path tests use this to shrink the
+// retry cost instead of waiting out the default per attempt.
+func WithWait(wait time.Duration) ClientOption {
+	return func(c *Client) {
+		if wait > 0 {
+			c.wait = wait
+		}
+	}
+}
+
 // NewClientWithConn returns a Client running over an injected connection
 // instead of a bound broadcast socket — the test seam the nsdptest fake
 // agent builds on. peer is the destination address every request is
 // written to (e.g. a loopback UDP listener's Addr); agentMAC is the target
 // switch MAC (nil = broadcast GETs; Login and SETs require it, the login
 // token is derived from it); password is the switch admin password Login
-// derives its token from. An injected conn carries no interface to take a
+// derives its token from. opts override the construction defaults
+// (WithWait). An injected conn carries no interface to take a
 // manager MAC from, so a random locally administered unicast address is
-// generated. The per-request response window is the 800ms default. The
-// returned Client owns conn: Close closes it.
-func NewClientWithConn(conn net.PacketConn, agentMAC net.HardwareAddr, peer net.Addr, password string) (*Client, error) {
+// generated. The per-request response window is the 800ms default unless
+// WithWait says otherwise. The returned Client owns conn: Close closes it.
+func NewClientWithConn(conn net.PacketConn, agentMAC net.HardwareAddr, peer net.Addr, password string, opts ...ClientOption) (*Client, error) {
 	if conn == nil {
 		return nil, errors.New("nsdp: NewClientWithConn: nil connection")
 	}
 	if peer == nil {
 		return nil, errors.New("nsdp: NewClientWithConn: nil peer address")
 	}
-	return newClientOver(conn, randomManagerMAC(), agentMAC, peer, []byte(password), 0, nil), nil
+	c := newClientOver(conn, randomManagerMAC(), agentMAC, peer, []byte(password), 0, nil)
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
 }
 
 // newClientOver is the shared construction core of NewClient and
@@ -249,8 +349,18 @@ func (c *Client) Login() error {
 	if err != nil {
 		return fmt.Errorf("login: get nonce (attr 0x17): %w", err)
 	}
+	// v1 dialect (and any capability word without a token bit): the auth
+	// TLV is the (possibly NtgrRock-XORed) password itself under tag
+	// 0x000A — no nonce is mixed in and the switch answers attr 0x17
+	// with an EMPTY TLV (live GS108Tv2: len 0), so a non-4-byte nonce is
+	// not malformed; it is simply unused. token-based branches (0x08 /
+	// 0x10) still hard-require the 4-byte nonce.
 	if len(nonce) != 4 {
-		return &ErrMalformed{Reason: fmt.Sprintf("nonce TLV 0x0017 has %d value bytes, want 4", len(nonce))}
+		if v&0x18 == 0 {
+			nonce = nil
+		} else {
+			return &ErrMalformed{Reason: fmt.Sprintf("nonce TLV 0x0017 has %d value bytes, want 4", len(nonce))}
+		}
 	}
 
 	// Derive and cache the auth token: every CMD_SET_REQUEST on this
@@ -334,6 +444,27 @@ func (c *Client) GetAttrs(tags ...byte) (map[byte][]byte, error) {
 	if len(tags) == 0 {
 		return nil, errors.New("nsdp: GetAttrs requires at least one tag")
 	}
+	// v1 dialect: no multi-tag batches. Live GS108Tv2: a batched small-tag
+	// GET goes unanswered after 14 attempts, exactly like the v1 reply
+	// decoder's (tag & 0xFC00) shape implies — fall back to sequential
+	// single-attr GETs, merging the answered subset.
+	if c.v1 {
+		m := make(map[byte][]byte, len(tags))
+		for _, tag := range tags {
+			val, err := c.GetAttr(tag)
+			if err != nil {
+				if errors.Is(err, ErrNoReply) {
+					continue
+				}
+				return nil, fmt.Errorf("GET attrs (v1 sequential): %w", err)
+			}
+			m[tag] = val
+		}
+		if len(m) == 0 {
+			return nil, fmt.Errorf("GET attrs % x (v1 sequential): no tag answered: %w", tags, ErrNoReply)
+		}
+		return m, nil
+	}
 	want := make(map[uint16]bool, len(tags))
 	for _, tag := range tags {
 		want[uint16(tag)] = true
@@ -399,6 +530,12 @@ func (c *Client) GetSystemName() (string, error) {
 // ~30-minute SET lockout — all the more reason to never send a stale
 // token.
 func (c *Client) refreshToken() error {
+	// v1 dialect: the auth TLV is the password itself (no nonce mix), so
+	// the cached token never goes stale — nothing to refresh, and the
+	// POST-login nonce GET returns an empty/benign TLV anyway.
+	if c.capability&0x18 == 0 {
+		return nil
+	}
 	nonce, err := c.GetAttr(attrNonce)
 	if err != nil {
 		return fmt.Errorf("refresh auth nonce: %w", err)
@@ -591,24 +728,29 @@ func controlSockopts(network, address string, c syscall.RawConn) error {
 	return serr
 }
 
-// listenUDP4 binds the given UDP4 port, trying the interface's IPv4 address
-// first and falling back to the wildcard address 0.0.0.0:<port>.
+// listenUDP4 binds the given UDP4 port. With a nil iface it binds the
+// wildcard address 0.0.0.0:<port> directly (needed for v1 switches whose
+// replies arrive as limited broadcasts); otherwise it tries the
+// interface's IPv4 address first and falls back to the wildcard address
+// 0.0.0.0:<port>.
 func listenUDP4(iface *net.Interface, port int) (net.PacketConn, string, error) {
 	lc := net.ListenConfig{Control: controlSockopts}
-	if addrs, err := iface.Addrs(); err == nil {
-		for _, a := range addrs {
-			ipn, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip4 := ipn.IP.To4()
-			if ip4 == nil {
-				continue
-			}
-			addr := fmt.Sprintf("%s:%d", ip4, port)
-			conn, err := lc.ListenPacket(context.Background(), "udp4", addr)
-			if err == nil {
-				return conn, addr, nil
+	if iface != nil {
+		if addrs, err := iface.Addrs(); err == nil {
+			for _, a := range addrs {
+				ipn, ok := a.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				ip4 := ipn.IP.To4()
+				if ip4 == nil {
+					continue
+				}
+				addr := fmt.Sprintf("%s:%d", ip4, port)
+				conn, err := lc.ListenPacket(context.Background(), "udp4", addr)
+				if err == nil {
+					return conn, addr, nil
+				}
 			}
 		}
 	}

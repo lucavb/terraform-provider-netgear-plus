@@ -129,6 +129,9 @@ func (r *portBasedVLANResource) Read(ctx context.Context, req resource.ReadReque
 	}
 
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
+		if err := nsdpV1Guard(c, "Port-based VLAN management"); err != nil {
+			return err
+		}
 		// The guard applies to reads too: in a non-port-based mode the
 		// stale table would be surfaced as if it were live config.
 		if err := requirePortBasedEngineMode(c); err != nil {
@@ -224,6 +227,9 @@ func (r *portBasedVLANResource) apply(ctx context.Context, plan portBasedVLANRes
 	}
 
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
+		if err := nsdpV1Guard(c, "Port-based VLAN management"); err != nil {
+			return err
+		}
 		if err := requirePortBasedEngineMode(c); err != nil {
 			return err
 		}

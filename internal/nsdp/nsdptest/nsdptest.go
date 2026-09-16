@@ -90,6 +90,16 @@ type Options struct {
 	// "FAKESERIAL01". The reply blob carries the live 21-byte layout,
 	// so clients must parse it like the real thing.
 	SerialNumber string
+
+	// Per-port table scripting (optional; ports without an entry keep
+	// the factory defaults, see resetFactory). Each entry's Port byte
+	// (1-BASED, 1-8) picks the port it applies to, so tables can be
+	// scripted sparsely. The traffic counters (block 0x10) have NO wire
+	// SET path — this Options block is the only way to script them.
+	SpeedLinkStatuses []nsdp.SpeedLinkStatus      // 0x0c00 {speed, flow} per port
+	PortAdminStatuses []nsdp.PortAdminStatusEntry // 0x9400 {admin, flow} per port
+	PVIDs             []nsdp.PVIDEntry            // 0x3000 vlan_id per port
+	PortTrafficStats  []nsdp.PortTrafficStats     // 0x1000 6 counters per port
 }
 
 // VLAN8021QEntry is one stored 802.1Q table entry, held as the LOGICAL
@@ -129,6 +139,12 @@ type VLAN8021QEntry struct {
 //	    membership, so the drop is observable at the library boundary
 //	    by design — the provider's verify-corrective layer converts
 //	    it into a typed drift error, never silent success.
+//	SilentBlock: when non-zero, block GETs for that one block id stay
+//	    unanswered (every other block still answers) — the dropped
+//	    block-reply scenario for read-path partial-failure tests: the
+//	    client exhausts its retry schedule and that read fails alone.
+//	    Block id 0 is never a valid block GET (the family tag's high
+//	    byte), so 0 means "off".
 //
 // All remaining state is guarded by an internal mutex; the exported
 // getters are goroutine-safe and return copies.
@@ -137,6 +153,7 @@ type FakeAgent struct {
 	IgnoreSets                  bool
 	AuthFail                    bool
 	Reply8021QMembershipDropped bool
+	SilentBlock                 byte
 
 	mu       sync.Mutex
 	conn     net.PacketConn
@@ -154,6 +171,7 @@ type FakeAgent struct {
 	speedLink  [8][2]byte                // 0x0c00: {speed, flow} (flow mirrors the 0x9400 flow byte)
 	portQoS    [8]byte                   // 0x3800: nsdp.QoSPriority per port
 	pvid       [8]uint16                 // 0x3000
+	traffic    [8][6]uint64              // 0x1000: {received, sent, packets, broadcast, multicast, errors} per port
 	ingress    [8]uint16                 // 0x4c00
 	egress     [8]uint16                 // 0x5000
 	storm      [8]uint16                 // 0x5800
@@ -219,8 +237,11 @@ func newAgentOverConn(conn net.PacketConn, mac net.HardwareAddr, password string
 	// Identity is hardware-like: seeded once at construction, never by
 	// resetFactory (it survives TagFactoryDefaults, like the real
 	// switch's serial and model). Options.Attrs is copied LAST so the
-	// raw escape hatch can still override any scripted answer.
+	// raw escape hatch can still override any scripted answer. The
+	// per-port tables seed over the factory state the same way — a later
+	// TagFactoryDefaults SET resets them back to factory.
 	a.seedIdentity(opts)
+	a.seedTables(opts)
 	for tag, v := range opts.Attrs {
 		a.attrs[tag] = append([]byte(nil), v...)
 	}
@@ -269,6 +290,34 @@ func serialBlob(serial string) []byte {
 	return append(v, make([]byte, 21-len(v))...)
 }
 
+// seedTables scripts the per-port tables from Options: each entry's
+// Port byte picks the port it applies to (1-BASED, 1-8; entries outside
+// the range are ignored), ports without an entry keep the factory state.
+// The traffic counters (block 0x10) have no wire SET path, so this is the
+// only way to script them.
+func (a *FakeAgent) seedTables(opts Options) {
+	for _, e := range opts.SpeedLinkStatuses {
+		if e.Port >= 1 && e.Port <= 8 {
+			a.speedLink[e.Port-1] = [2]byte{e.Speed, e.Flow}
+		}
+	}
+	for _, e := range opts.PortAdminStatuses {
+		if e.Port >= 1 && e.Port <= 8 {
+			a.portAdmin[e.Port-1] = [2]byte{e.Admin, e.Flow}
+		}
+	}
+	for _, e := range opts.PVIDs {
+		if e.Port >= 1 && e.Port <= 8 {
+			a.pvid[e.Port-1] = e.VLANID
+		}
+	}
+	for _, e := range opts.PortTrafficStats {
+		if e.Port >= 1 && e.Port <= 8 {
+			a.traffic[e.Port-1] = [6]uint64{e.Received, e.Sent, e.Packets, e.Broadcast, e.Multicast, e.Errors}
+		}
+	}
+}
+
 // resetFactory seeds the scripted state with factory-fresh GS108Ev3 values.
 func (a *FakeAgent) resetFactory() {
 	a.systemName = "GS108Ev3"
@@ -277,6 +326,7 @@ func (a *FakeAgent) resetFactory() {
 		a.speedLink[p] = [2]byte{0x00, 0x00}
 		a.portQoS[p] = 4 // QoSPriority Low
 		a.pvid[p] = 1
+		a.traffic[p] = [6]uint64{} // zero counters (no packets counted yet)
 		a.ingress[p], a.egress[p], a.storm[p] = 0, 0, 0
 	}
 	a.mirror = [3]byte{0, 0, 0}
@@ -405,14 +455,32 @@ func (a *FakeAgent) handleGet(req []byte, addr net.Addr) {
 // replyBlockGet serves one scripted block. Bandwidth tables (0x4c00 /
 // 0x5000 / 0x5800) come as one 5-byte TLV per port — the confirmed
 // per-entry layout; the VLAN tables carry one entry per TLV (live-proven
-// 0x2400 packing); the other per-port tables ride as one TLV of
-// concatenated entries, which the nsdp decoders accept. Unknown blocks
-// stay silent, like the real switch — the client's GET retry loop then
-// exhausts.
+// 0x2400 packing); the other per-port tables (including the 49-byte
+// 0x1000 traffic statistics) ride as one TLV of concatenated entries,
+// which the nsdp decoders accept. Unknown blocks stay silent, like the
+// real switch — and the SilentBlock knob silences one scripted block the
+// same way, so the client's GET retry loop exhausts for that block
+// alone (the dropped-block-reply scenario).
 func (a *FakeAgent) replyBlockGet(req []byte, addr net.Addr, blockID byte) {
+	if a.SilentBlock != 0 && a.SilentBlock == blockID {
+		return // scripted silence: no reply, retry loop exhausts
+	}
 	tag := uint16(blockID) << 8
 	var tlvs []nsdp.TLV
 	switch tag {
+	case nsdp.TagPortTrafficStats:
+		// One 49-byte entry per port, concatenated in one TLV:
+		// {port u8 1-BASED, 6 × u64 BE counters}.
+		v := make([]byte, 0, 8*49)
+		for p := 0; p < 8; p++ {
+			v = append(v, byte(p+1))
+			for _, ctr := range &a.traffic[p] {
+				var b [8]byte
+				binary.BigEndian.PutUint64(b[:], ctr)
+				v = append(v, b[:]...)
+			}
+		}
+		tlvs = append(tlvs, nsdp.TLV{Tag: tag, Value: v})
 	case nsdp.TagPortAdminStatus:
 		v := make([]byte, 0, 24)
 		for p := 0; p < 8; p++ {
@@ -751,6 +819,27 @@ func (a *FakeAgent) PVIDs() []nsdp.PVIDEntry {
 	out := make([]nsdp.PVIDEntry, 8)
 	for p := 0; p < 8; p++ {
 		out[p] = nsdp.PVIDEntry{Port: byte(p + 1), VLANID: a.pvid[p]}
+	}
+	return out
+}
+
+// PortTrafficStats returns the 0x1000 table: one counter entry
+// {received, sent, packets, broadcast, multicast, errors} per 1-based
+// port.
+func (a *FakeAgent) PortTrafficStats() []nsdp.PortTrafficStats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]nsdp.PortTrafficStats, 8)
+	for p := 0; p < 8; p++ {
+		out[p] = nsdp.PortTrafficStats{
+			Port:      byte(p + 1),
+			Received:  a.traffic[p][0],
+			Sent:      a.traffic[p][1],
+			Packets:   a.traffic[p][2],
+			Broadcast: a.traffic[p][3],
+			Multicast: a.traffic[p][4],
+			Errors:    a.traffic[p][5],
+		}
 	}
 	return out
 }

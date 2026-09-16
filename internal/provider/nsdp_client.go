@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/lucavb/terraform-provider-netgear-plus/internal/client"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/nsdp"
 )
 
@@ -21,6 +22,13 @@ type nsdpClient interface {
 	GetSystemName() (string, error)
 	SetSystemName(name string) error
 	SetRaw(tag uint16, value []byte) error
+
+	// IsV1 reports the legacy NSDP v1 dialect (GS108Tv2-class): v1
+	// engines answer ONLY the flat scalar TLV set — identity, network
+	// params, system name/location. Every block/0xNN00-family operation
+	// below is structurally impossible and must be refused with a
+	// provenance error (nsdpV1Guard), not a protocol timeout.
+	IsV1() bool
 
 	// Block GETs (dump.go) and typed per-port SETs (methods.go) used by
 	// the NSDP resources.
@@ -128,11 +136,18 @@ func (d *providerData) nsdpClient(ctx context.Context) (nsdpClient, error) {
 	// NSDP client unicasts to the switch's routable address instead of
 	// limited-broadcast (live-proven on the GS108Ev3, 2026-09-13). An
 	// empty host keeps the nsdp package's broadcast default.
+	//
+	// LegacyV1 turns on the NSDP v1 dialect exactly when the provider
+	// model is gs108tv2: the v1 port pair (63323/63324 — overridden
+	// ListenPort/ServerPort), single-attr GETs, no block reads, and the
+	// nonce-less password-XOR login branch (capability 0x07,
+	// live-probed 2026-09-15).
 	client, err := factory(nsdp.Options{
 		IfaceName: d.ifaceName,
 		AgentMAC:  d.agentMAC,
 		Password:  []byte(d.config.Password),
 		Dest:      nsdpDestHost(d.config.Host),
+		LegacyV1:  strings.EqualFold(strings.TrimSpace(d.config.Model), client.ModelGS108Tv2),
 	})
 	if err != nil {
 		return nil, err
@@ -160,13 +175,16 @@ func (d *providerData) invalidateCachedNSDPClient() {
 }
 
 // nsdpConfigFingerprint tracks only the fields that shape the NSDP socket
-// and login: interface, normalized agent MAC, password, and the NSDP
-// destination derived from host (nsdpDestHost). Host feeds the NSDP
-// client as the unicast destination when agent_mac is set, so a
-// destination change must rebuild the cached client — while host
-// spellings that resolve to the same destination (URL vs bare host)
-// deliberately share one fingerprint. Other HTTP-only config fields
-// (model, timeouts, insecure_http) never leak in here.
+// and login: interface, normalized agent MAC, password, the NSDP
+// destination derived from host (nsdpDestHost), and the protocol dialect
+// (the model — LegacyV1 flips both the port pair and the request
+// semantics, so a model change must rebuild the cached client; otherwise
+// a live-logged-in v2 session would be reused against a v1 switch
+// silently). Host feeds the NSDP client as the unicast destination when
+// agent_mac is set, so a destination change must rebuild the cached
+// client — while host spellings that resolve to the same destination
+// (URL vs bare host) deliberately share one fingerprint. Other HTTP-only
+// config fields (timeouts, insecure_http) never leak in here.
 func (d *providerData) nsdpConfigFingerprint() string {
 	if d == nil {
 		return ""
@@ -177,7 +195,48 @@ func (d *providerData) nsdpConfigFingerprint() string {
 		normalizeAgentMAC(d.agentMAC),
 		strings.TrimSpace(d.config.Password),
 		nsdpDestHost(d.config.Host),
+		nsdpModelDialectKey(d.config.Model),
 	}, "\x00")
+}
+
+// nsdpModelDialectKey collapses the provider model into the NSDP dialect
+// identity the fingerprint tracks: gs108ev3 and the empty default are the
+// SAME v2 dialect (one key, ""), while any other known model (gs108tv2)
+// gets its own key so switching dialects rebuilds the cached client.
+// Unknown model strings map through unchanged — NewDriver/validators
+// reject them before a live client is built.
+func nsdpModelDialectKey(model string) string {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if normalized == client.ModelGS108Ev3 {
+		return ""
+	}
+	return normalized
+}
+
+// nsdpV1Guard refuses feature families that no NSDP v1 switch can
+// express. The v1 engine (GS108Tv2/GS110TPv2-class FASTPATH firmware)
+// answers only the flat scalar TLV set — its reply decoder structurally
+// rejects tags ≥ 0x0400 (confirmed in switchdrvr.bin at 0x002a5xxx) —
+// so every block-style operation (802.1Q VLAN table, PVID table, port
+// config, rate limits, mirroring, …) would die as a protocol timeout
+// instead of a clean refusal if it were sent.
+//
+// Supported v1 surface (live-verified 2026-09-15): switch identity and
+// firmware facts (GetIdentity), system name read/write, IP config
+// TLVs, capability word, flat ASCII serial (TLV 0x0019). Everything
+// else waits for the NSDP text-config transport (nsdpTftpOpen /
+// NSDP_TLV_CONFIG_FILE_VALIDATION path in the same firmware).
+func nsdpV1Guard(client nsdpClient, family string) error {
+	if client.IsV1() {
+		return &providerOperationError{
+			summary: fmt.Sprintf("%s is not supported on this switch over NSDP", family),
+			detail: fmt.Sprintf(
+				"This switch's firmware speaks the legacy NSDP v1 dialect (model gs108tv2-class), which only carries flat scalar attributes: switch facts, system name, and IP configuration. The v1 engine has no %s datatypes, so the provider refuses the operation instead of hanging it as a protocol timeout. VLAN and port management for this switch generation will arrive through the switch's text-config transport.",
+				family,
+			),
+		}
+	}
+	return nil
 }
 
 // NSDP reply status/tags that point at a stale or missing auth token

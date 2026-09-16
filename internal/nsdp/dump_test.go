@@ -527,3 +527,108 @@ func TestSetRawAuthBeforeUserTLV(t *testing.T) {
 		t.Fatalf("terminator = % x", raw[off+7:])
 	}
 }
+
+// TestTypedBlockReads pins the three typed single-block reads
+// (GetSpeedLinkStatuses 0x0c, GetPortAdminStatuses 0x94,
+// GetPortTrafficStats 0x10) against the fake switch: seeded family-tag
+// values decode into the typed slices (via the shared DecodeTLV cases),
+// a silent block surfaces the wrapped ErrNoReply, and a reply whose
+// value length breaks the entry layout surfaces the DecodeTLV note.
+func TestTypedBlockReads(t *testing.T) {
+	// One 49-byte 0x1000 entry: port 2, counters 1..6 — plus one
+	// concatenated entry for port 7 with the same counters (the decoder
+	// tolerates several entries per TLV, like the live replies).
+	var statsValue []byte
+	for _, port := range []byte{2, 7} {
+		statsValue = append(statsValue, port)
+		for _, n := range []uint64{1, 2, 3, 4, 5, 6} {
+			var b [8]byte
+			binary.BigEndian.PutUint64(b[:], n)
+			statsValue = append(statsValue, b[:]...)
+		}
+	}
+	sim := &switchSim{
+		capability: goldenCapability,
+		nonce:      []byte{0x91, 0x6e, 0x11, 0x22},
+		blocks: map[byte][]TLV{
+			0x0c: {{Tag: TagSpeedLinkStatus, Value: []byte{0x01, 0x05, 0x01, 0x06, 0x00, 0x00}}},
+			0x94: {{Tag: TagPortAdminStatus, Value: []byte{0x03, 0x00, 0x01}}},
+			0x10: {{Tag: TagPortTrafficStats, Value: statsValue}},
+		},
+	}
+	c := &Client{
+		conn:     sim,
+		dst:      broadcastUDP(),
+		mac:      goldenMAC,
+		agentMAC: goldenAgentMAC,
+		wait:     time.Millisecond,
+		seq:      9000,
+	}
+
+	speed, err := c.GetSpeedLinkStatuses()
+	if err != nil {
+		t.Fatalf("GetSpeedLinkStatuses: %v", err)
+	}
+	wantSpeed := []SpeedLinkStatus{{Port: 1, Speed: 5, Flow: 1}, {Port: 6, Speed: 0, Flow: 0}}
+	if len(speed) != len(wantSpeed) {
+		t.Fatalf("GetSpeedLinkStatuses = %+v, want %+v", speed, wantSpeed)
+	}
+	for i := range wantSpeed {
+		if speed[i] != wantSpeed[i] {
+			t.Fatalf("speed entry %d = %+v, want %+v", i, speed[i], wantSpeed[i])
+		}
+	}
+
+	admin, err := c.GetPortAdminStatuses()
+	if err != nil {
+		t.Fatalf("GetPortAdminStatuses: %v", err)
+	}
+	wantAdmin := []PortAdminStatusEntry{{Port: 3, Admin: 0, Flow: 1}}
+	if len(admin) != len(wantAdmin) || admin[0] != wantAdmin[0] {
+		t.Fatalf("GetPortAdminStatuses = %+v, want %+v", admin, wantAdmin)
+	}
+
+	stats, err := c.GetPortTrafficStats()
+	if err != nil {
+		t.Fatalf("GetPortTrafficStats: %v", err)
+	}
+	wantEntry := PortTrafficStats{Received: 1, Sent: 2, Packets: 3, Broadcast: 4, Multicast: 5, Errors: 6}
+	wantStats := []PortTrafficStats{{Port: 2}, {Port: 7}}
+	wantStats[0], wantStats[1] = wantEntry, wantEntry
+	wantStats[0].Port, wantStats[1].Port = 2, 7
+	if len(stats) != len(wantStats) {
+		t.Fatalf("GetPortTrafficStats = %+v, want %+v", stats, wantStats)
+	}
+	for i := range wantStats {
+		if stats[i] != wantStats[i] {
+			t.Fatalf("stats entry %d = %+v, want %+v", i, stats[i], wantStats[i])
+		}
+	}
+
+	// Silent block: nothing seeds 0x30, so the read must exhaust the
+	// retry schedule and surface ErrNoReply wrapped in the method's
+	// context (same shape as GetPVIDs on a silent switch).
+	if _, err := c.GetPVIDs(); err == nil || !errors.Is(err, ErrNoReply) {
+		t.Fatalf("GetPVIDs on a silent block error = %v, want wrapped ErrNoReply", err)
+	}
+
+	// Malformed entry length: a 2-byte 0x0c00 value cannot decode, so the
+	// typed read must surface the DecodeTLV note instead of returning
+	// zero-value entries.
+	bad := &Client{
+		conn: &switchSim{
+			capability: goldenCapability,
+			nonce:      []byte{0x91, 0x6e, 0x11, 0x22},
+			blocks:     map[byte][]TLV{0x0c: {{Tag: TagSpeedLinkStatus, Value: []byte{0x01, 0x05}}}},
+		},
+		dst:      broadcastUDP(),
+		mac:      goldenMAC,
+		agentMAC: goldenAgentMAC,
+		wait:     time.Millisecond,
+		seq:      9100,
+	}
+	_, err = bad.GetSpeedLinkStatuses()
+	if err == nil || !strings.Contains(err.Error(), "not a multiple of 3") {
+		t.Fatalf("GetSpeedLinkStatuses on a malformed reply error = %v, want the DecodeTLV length note", err)
+	}
+}

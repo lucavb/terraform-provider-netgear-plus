@@ -201,6 +201,7 @@ func (f *fakeSwitch) GetAttrs(...byte) (map[byte][]byte, error) {
 func (f *fakeSwitch) GetSystemName() (string, error) { return "fake", nil }
 func (f *fakeSwitch) SetSystemName(string) error     { return nil }
 func (f *fakeSwitch) SetRaw(uint16, []byte) error    { return nil }
+func (f *fakeSwitch) IsV1() bool                     { return false }
 
 func (f *fakeSwitch) GetBlock(blockID byte, _ []byte) ([]nsdp.Attr, error) {
 	if f.GetBlockErr != nil {

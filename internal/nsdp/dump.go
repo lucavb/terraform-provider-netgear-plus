@@ -556,6 +556,88 @@ func DecodeTLV(t TLV) Attr {
 	return a
 }
 
+// --- Typed block reads ------------------------------------------------------
+//
+// Single-block typed reads mirroring GetPVIDs (vlan.go): GetBlock with a
+// nil selector, the reply filtered to the block's family tag, each value
+// decoded through DecodeTLV and type-asserted to the typed slice. All
+// GET-only, no login.
+
+// GetSpeedLinkStatuses reads the per-port speed/link table (block 0x0c):
+// 3-byte entries {port u8 1-BASED, speed u8, flow u8} — the layout shared
+// with the CLI render path (DecodeTLV's TagSpeedLinkStatus case), surfaced
+// here as a typed read for the metrics exporter. The flow byte mirrors
+// the 0x9400 flow byte (see SpeedLinkStatus).
+func (c *Client) GetSpeedLinkStatuses() ([]SpeedLinkStatus, error) {
+	attrs, err := c.GetBlock(0x0c, nil)
+	if err != nil {
+		return nil, fmt.Errorf("nsdp: read speed/link table (block 0x0c): %w", err)
+	}
+	var out []SpeedLinkStatus
+	for _, a := range attrs {
+		if a.Tag != TagSpeedLinkStatus {
+			continue
+		}
+		d := DecodeTLV(TLV{Tag: a.Tag, Value: a.Value})
+		entries, ok := d.Decoded.([]SpeedLinkStatus)
+		if !ok {
+			return nil, fmt.Errorf("nsdp: 0x%04x: %s", a.Tag, d.Note)
+		}
+		out = append(out, entries...)
+	}
+	return out, nil
+}
+
+// GetPortAdminStatuses reads the per-port admin table (block 0x94):
+// 3-byte entries {port u8 1-BASED, admin u8, flow u8} — the layout shared
+// with the CLI render path (DecodeTLV's TagPortAdminStatus case), surfaced
+// here as a typed read for the metrics exporter.
+func (c *Client) GetPortAdminStatuses() ([]PortAdminStatusEntry, error) {
+	attrs, err := c.GetBlock(0x94, nil)
+	if err != nil {
+		return nil, fmt.Errorf("nsdp: read port admin table (block 0x94): %w", err)
+	}
+	var out []PortAdminStatusEntry
+	for _, a := range attrs {
+		if a.Tag != TagPortAdminStatus {
+			continue
+		}
+		d := DecodeTLV(TLV{Tag: a.Tag, Value: a.Value})
+		entries, ok := d.Decoded.([]PortAdminStatusEntry)
+		if !ok {
+			return nil, fmt.Errorf("nsdp: 0x%04x: %s", a.Tag, d.Note)
+		}
+		out = append(out, entries...)
+	}
+	return out, nil
+}
+
+// GetPortTrafficStats reads the per-port traffic statistics (block 0x10):
+// 49-byte entries {port u8 1-BASED, 6 × u64 BE counters} — the CONFIRMED
+// layout shared with the CLI render path (DecodeTLV's TagPortTrafficStats
+// case), surfaced here as a typed read for the metrics exporter. The
+// switch updates these counters live; there is no SET path (tag 0x1400
+// only RESETS them).
+func (c *Client) GetPortTrafficStats() ([]PortTrafficStats, error) {
+	attrs, err := c.GetBlock(0x10, nil)
+	if err != nil {
+		return nil, fmt.Errorf("nsdp: read traffic statistics (block 0x10): %w", err)
+	}
+	var out []PortTrafficStats
+	for _, a := range attrs {
+		if a.Tag != TagPortTrafficStats {
+			continue
+		}
+		d := DecodeTLV(TLV{Tag: a.Tag, Value: a.Value})
+		entries, ok := d.Decoded.([]PortTrafficStats)
+		if !ok {
+			return nil, fmt.Errorf("nsdp: 0x%04x: %s", a.Tag, d.Note)
+		}
+		out = append(out, entries...)
+	}
+	return out, nil
+}
+
 // DefaultDumpSmallTags is the batch of small tags a Dump reads in ONE
 // multi-tag GET: the ROUND 7 client-parsed set (strings, model code, MAC,
 // IP/mask/gateway, scalars, fw images, active image, capability, nonce).

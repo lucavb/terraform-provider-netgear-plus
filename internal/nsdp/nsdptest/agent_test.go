@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/nsdp"
 )
@@ -663,4 +664,174 @@ func TestIdentityFirmwareFallback(t *testing.T) {
 		FirmwareVersion: "7.7.7", // 0x000d empty -> 0x000e
 		SystemName:      "GS108Ev3",
 	})
+}
+
+// --- Options table scripting + dropped-block scenario -----------------------
+
+// scriptedTablesOptions is the Options seed of the per-port table
+// scripting scenario: sparse entries for speed (0x0c00), admin (0x9400),
+// PVID (0x3000) and traffic counters (0x1000) over the factory defaults.
+func scriptedTablesOptions() Options {
+	return Options{
+		SpeedLinkStatuses: []nsdp.SpeedLinkStatus{
+			{Port: 1, Speed: 5, Flow: 1},
+			{Port: 6, Speed: 2},
+		},
+		PortAdminStatuses: []nsdp.PortAdminStatusEntry{
+			{Port: 8, Admin: 0, Flow: 1},
+		},
+		PVIDs: []nsdp.PVIDEntry{
+			{Port: 4, VLANID: 1001},
+		},
+		PortTrafficStats: []nsdp.PortTrafficStats{
+			{Port: 3, Received: 100, Sent: 200, Packets: 5, Broadcast: 1, Multicast: 2, Errors: 3},
+		},
+	}
+}
+
+// assertScriptedPerPortTables pins the Options per-port table scripting
+// and the block-0x10 traffic statistics: seeded speed/admin/PVID/traffic
+// entries land on their ports, unscripted ports keep the factory values,
+// and every table reads back through the typed methods the exporter is
+// built on (GetSpeedLinkStatuses, GetPortAdminStatuses, GetPVIDs,
+// GetPortTrafficStats). The traffic counters have no wire SET path, so
+// Options is their only scripting surface. Transport-agnostic: runs over
+// loopback UDP and the in-memory transport alike.
+func assertScriptedPerPortTables(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
+	t.Helper()
+	speed, err := c.GetSpeedLinkStatuses()
+	if err != nil {
+		t.Fatalf("GetSpeedLinkStatuses: %v", err)
+	}
+	if len(speed) != 8 {
+		t.Fatalf("GetSpeedLinkStatuses returned %d entries, want 8", len(speed))
+	}
+	for i, e := range speed {
+		want := nsdp.SpeedLinkStatus{Port: e.Port} // factory zeros
+		switch e.Port {
+		case 1:
+			want = nsdp.SpeedLinkStatus{Port: 1, Speed: 5, Flow: 1}
+		case 6:
+			want = nsdp.SpeedLinkStatus{Port: 6, Speed: 2}
+		}
+		if e != want {
+			t.Fatalf("0x0c00 entry %d = %+v, want %+v", i+1, e, want)
+		}
+	}
+
+	admin, err := c.GetPortAdminStatuses()
+	if err != nil {
+		t.Fatalf("GetPortAdminStatuses: %v", err)
+	}
+	if len(admin) != 8 {
+		t.Fatalf("GetPortAdminStatuses returned %d entries, want 8", len(admin))
+	}
+	for i, e := range admin {
+		want := nsdp.PortAdminStatusEntry{Port: e.Port, Admin: 1, Flow: 0} // factory
+		if e.Port == 8 {
+			want = nsdp.PortAdminStatusEntry{Port: 8, Admin: 0, Flow: 1}
+		}
+		if e != want {
+			t.Fatalf("0x9400 entry %d = %+v, want %+v", i+1, e, want)
+		}
+	}
+
+	pvids, err := c.GetPVIDs()
+	if err != nil {
+		t.Fatalf("GetPVIDs: %v", err)
+	}
+	if len(pvids) != 8 {
+		t.Fatalf("GetPVIDs returned %d entries, want 8", len(pvids))
+	}
+	for i, e := range pvids {
+		want := nsdp.PVIDEntry{Port: e.Port, VLANID: 1} // factory
+		if e.Port == 4 {
+			want = nsdp.PVIDEntry{Port: 4, VLANID: 1001}
+		}
+		if e != want {
+			t.Fatalf("0x3000 entry %d = %+v, want %+v", i+1, e, want)
+		}
+	}
+
+	stats, err := c.GetPortTrafficStats()
+	if err != nil {
+		t.Fatalf("GetPortTrafficStats: %v", err)
+	}
+	if len(stats) != 8 {
+		t.Fatalf("GetPortTrafficStats returned %d entries, want 8", len(stats))
+	}
+	wantSeeded := nsdp.PortTrafficStats{Port: 3, Received: 100, Sent: 200, Packets: 5, Broadcast: 1, Multicast: 2, Errors: 3}
+	for i, e := range stats {
+		want := nsdp.PortTrafficStats{Port: byte(i + 1)} // factory zero counters
+		if e.Port == 3 {
+			want = wantSeeded
+		}
+		if e != want {
+			t.Fatalf("0x1000 entry %d = %+v, want %+v", i+1, e, want)
+		}
+	}
+	if got := agent.PortTrafficStats(); got[2] != wantSeeded {
+		t.Fatalf("agent state port 3 counters = %+v, want %+v", got[2], wantSeeded)
+	}
+}
+
+// assertSilentBlockKnob pins the SilentBlock knob: with block 0x10
+// silenced, GetPortTrafficStats fails alone (the client's retry schedule
+// exhausts with ErrNoReply) while every other scripted block still
+// answers — the read-path partial-failure scenario the exporter's
+// drop-one-group scrape test builds on. Ends with the knob cleared and
+// the block answering again. The client must be dialed with a shrunken
+// wait window (see dialClientWait / startMemSessionWait): the silent
+// block burns the full 14-attempt retry schedule.
+func assertSilentBlockKnob(t *testing.T, agent *FakeAgent, c *nsdp.Client) {
+	t.Helper()
+	agent.SilentBlock = 0x10
+	defer func() { agent.SilentBlock = 0 }()
+
+	_, err := c.GetPortTrafficStats()
+	if !errors.Is(err, nsdp.ErrNoReply) {
+		t.Fatalf("GetPortTrafficStats under SilentBlock error = %v, want ErrNoReply", err)
+	}
+	if _, err := c.GetSpeedLinkStatuses(); err != nil {
+		t.Fatalf("GetSpeedLinkStatuses under SilentBlock(0x10): %v (want the other blocks unaffected)", err)
+	}
+	if _, err := c.GetPVIDs(); err != nil {
+		t.Fatalf("GetPVIDs under SilentBlock(0x10): %v (want the other blocks unaffected)", err)
+	}
+
+	// Knob cleared: the block answers again.
+	agent.SilentBlock = 0
+	if _, err := c.GetPortTrafficStats(); err != nil {
+		t.Fatalf("GetPortTrafficStats after knob cleared: %v", err)
+	}
+}
+
+// dialClientWait is DialClient with a shrunken response window
+// (nsdp.WithWait): failure-path scenarios below burn the retry schedule
+// against a silent block, and the 800ms default would cost 14 × 800ms
+// per silent request — the knob keeps the suite fast instead.
+func dialClientWait(t *testing.T, agent *FakeAgent, wait time.Duration) *nsdp.Client {
+	t.Helper()
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind client socket: %v", err)
+	}
+	c, err := nsdp.NewClientWithConn(conn, agent.MAC(), agent.Addr(), agent.Password(), nsdp.WithWait(wait))
+	if err != nil {
+		conn.Close()
+		t.Fatalf("nsdptest: dial client: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+func TestScriptedPerPortTables(t *testing.T) {
+	agent, c := startClient(t, scriptedTablesOptions())
+	assertScriptedPerPortTables(t, agent, c)
+}
+
+func TestSilentBlockKnob(t *testing.T) {
+	agent := Start(t, Options{})
+	c := dialClientWait(t, agent, 5*time.Millisecond)
+	assertSilentBlockKnob(t, agent, c)
 }

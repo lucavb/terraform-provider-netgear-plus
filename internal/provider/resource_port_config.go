@@ -176,6 +176,9 @@ func (r *portConfigResource) Read(ctx context.Context, req resource.ReadRequest,
 	}
 
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
+		if err := nsdpV1Guard(c, "Port configuration management"); err != nil {
+			return err
+		}
 		actual, err := readPortConfigs(c)
 		if err != nil {
 			return operationError("Read port configuration failed", err)
@@ -240,6 +243,9 @@ func (r *portConfigResource) apply(ctx context.Context, plan portConfigResourceM
 	}
 
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
+		if err := nsdpV1Guard(c, "Port configuration management"); err != nil {
+			return err
+		}
 		actual, err := readPortConfigs(c)
 		if err != nil {
 			return operationError("Read current port configuration failed", err)

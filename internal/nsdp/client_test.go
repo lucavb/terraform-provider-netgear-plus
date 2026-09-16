@@ -468,21 +468,26 @@ func TestSetSystemNameRejectedNoAuth(t *testing.T) {
 // v2 switch port appended, host:port passthrough, and udp4 enforcement.
 func TestResolveDest(t *testing.T) {
 	tests := []struct {
-		name    string
-		dest    string
-		want    *net.UDPAddr
-		wantErr bool
+		name       string
+		dest       string
+		serverPort int
+		want       *net.UDPAddr
+		wantErr    bool
 	}{
-		{"empty = default broadcast", "", &net.UDPAddr{IP: net.IPv4(255, 255, 255, 255), Port: serverPort}, false},
-		{"bare host gets port 63322", "192.168.0.2", &net.UDPAddr{IP: net.IPv4(192, 168, 0, 2), Port: serverPort}, false},
-		{"host:port passthrough", "10.1.2.3:7000", &net.UDPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 7000}, false},
-		{"invalid port", "192.168.0.2:foo", nil, true},
-		{"non-udp4 address rejected", "fe80::1", nil, true},
-		{"invalid ipv4 octets", "300.1.2.3", nil, true},
+		{"empty = default broadcast", "", 0, &net.UDPAddr{IP: net.IPv4(255, 255, 255, 255), Port: serverPort}, false},
+		{"bare host gets port 63322", "192.168.0.2", 0, &net.UDPAddr{IP: net.IPv4(192, 168, 0, 2), Port: serverPort}, false},
+		{"host:port passthrough", "10.1.2.3:7000", 0, &net.UDPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 7000}, false},
+		{"invalid port", "192.168.0.2:foo", 0, nil, true},
+		{"non-udp4 address rejected", "fe80::1", 0, nil, true},
+		{"invalid ipv4 octets", "300.1.2.3", 0, nil, true},
+		// v1 pairs: Options.ServerPort shifts the appended default port
+		// (e.g. GS108Tv2 v1: bind 63323, switch port 63324).
+		{"empty + v1 override", "", 63324, &net.UDPAddr{IP: net.IPv4(255, 255, 255, 255), Port: 63324}, false},
+		{"bare host + v1 override", "10.0.2.8", 63324, &net.UDPAddr{IP: net.IPv4(10, 0, 2, 8), Port: 63324}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveDest(tt.dest)
+			got, err := resolveDest(tt.dest, tt.serverPort)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("resolveDest(%q) = %v, want error", tt.dest, got)
@@ -500,5 +505,38 @@ func TestResolveDest(t *testing.T) {
 				t.Fatalf("resolveDest(%q) = %v, want %v", tt.dest, udp, tt.want)
 			}
 		})
+	}
+}
+
+// TestNewClientWithConnOptions pins the variadic construction knobs of
+// NewClientWithConn: the zero-option call keeps the 800ms default window
+// (behavior unchanged for existing callers), WithWait overrides it, and a
+// non-positive WithWait falls back to the default.
+func TestNewClientWithConnOptions(t *testing.T) {
+	conn := &blackholeConn{}
+	peer := broadcastUDP()
+
+	c, err := NewClientWithConn(conn, goldenAgentMAC, peer, "")
+	if err != nil {
+		t.Fatalf("NewClientWithConn: %v", err)
+	}
+	if c.wait != defaultWait {
+		t.Fatalf("default wait = %v, want %v", c.wait, defaultWait)
+	}
+
+	c, err = NewClientWithConn(conn, goldenAgentMAC, peer, "", WithWait(3*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewClientWithConn(WithWait): %v", err)
+	}
+	if c.wait != 3*time.Millisecond {
+		t.Fatalf("WithWait(3ms) wait = %v, want 3ms", c.wait)
+	}
+
+	c, err = NewClientWithConn(conn, goldenAgentMAC, peer, "", WithWait(0))
+	if err != nil {
+		t.Fatalf("NewClientWithConn(WithWait(0)): %v", err)
+	}
+	if c.wait != defaultWait {
+		t.Fatalf("WithWait(0) wait = %v, want the default %v", c.wait, defaultWait)
 	}
 }

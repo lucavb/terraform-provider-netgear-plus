@@ -154,6 +154,9 @@ func (t nsdpSwitchTransport) ReadSwitchFacts(_ context.Context) (model.SwitchFac
 //   - The PVID table must carry exactly ports 1-8, each once → typed
 //     error on short, duplicate, or out-of-range tables.
 func (t nsdpSwitchTransport) ReadVLANState(_ context.Context) (model.VLANState, error) {
+	if err := nsdpV1Guard(t.client, "802.1Q VLAN state management"); err != nil {
+		return model.VLANState{}, err
+	}
 	if err := require8021QEngineMode(t.client); err != nil {
 		return model.VLANState{}, err
 	}
@@ -229,6 +232,9 @@ func (t nsdpSwitchTransport) ReadVLANState(_ context.Context) (model.VLANState, 
 // port (NSDP's PVID write is per-port); the checkbox delete form
 // becomes Delete8021QVLAN (idempotent, live-proven).
 func (t nsdpSwitchTransport) ApplyVLANState(ctx context.Context, desired model.VLANState) error {
+	if err := nsdpV1Guard(t.client, "802.1Q VLAN state management"); err != nil {
+		return err
+	}
 	desired = desired.Normalize()
 	if err := desired.Validate(); err != nil {
 		return err
