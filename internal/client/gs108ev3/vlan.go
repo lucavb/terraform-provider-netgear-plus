@@ -10,7 +10,13 @@ import (
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/model"
 )
 
-// ApplyVLANState applies the full authoritative VLAN state to the device.
+// ApplyVLANState applies the full authoritative VLAN state to the
+// device by reading the current state, building a model.Plan (the pure
+// convergence pipeline transposed out of this driver), and replaying it
+// through the driver's web-UI forms via the model.VLANApplier seam. The
+// hash/count plumbing (ensureHash/getVLANCount) stays driver-side,
+// outside the plan: an empty plan short-circuits before ensureHash,
+// exactly like the old Equal early-return.
 func (d *Driver) ApplyVLANState(ctx context.Context, desired model.VLANState) error {
 	desired = desired.Normalize()
 	if err := desired.Validate(); err != nil {
@@ -22,8 +28,11 @@ func (d *Driver) ApplyVLANState(ctx context.Context, desired model.VLANState) er
 		return fmt.Errorf("read current vlan state: %w", err)
 	}
 
-	current = current.Normalize()
-	if current.Equal(desired) {
+	plan, err := model.Plan(current, desired)
+	if err != nil {
+		return err
+	}
+	if len(plan) == 0 {
 		return nil
 	}
 
@@ -32,77 +41,43 @@ func (d *Driver) ApplyVLANState(ctx context.Context, desired model.VLANState) er
 		return err
 	}
 
-	removed := model.RemovedVLANs(current, desired)
-	preservedPorts := model.PreservedPorts(desired)
+	return model.Run(ctx, plan, vlanApplier{driver: d, hash: hash})
+}
 
-	step1 := make(map[int]model.Vlan)
-	step2 := make(map[int]model.Vlan)
+// vlanApplier adapts the plan's ops onto the driver's web-UI forms.
+// The hash is captured once per non-empty apply (the plan ops all need
+// it); vlanCount is fetched per add/delete form, as before.
+type vlanApplier struct {
+	driver *Driver
+	hash   string
+}
 
-	for _, vid := range model.AddedVLANs(current, desired) {
-		step1[vid] = desired.VLANs[vid]
-	}
+var _ model.VLANApplier = vlanApplier{}
 
-	currentIDs := current.VLANIDs()
-	desiredIDs := desired.VLANIDs()
-	for _, vid := range intersect(currentIDs, desiredIDs) {
-		step1[vid] = model.Vlan{
-			ID:    vid,
-			Ports: mergedMembership(current.VLANs[vid].Ports, desired.VLANs[vid].Ports),
-		}
-		step2[vid] = desired.VLANs[vid]
-	}
+// AddVLAN executes the device's add form for one newly added VLAN.
+func (a vlanApplier) AddVLAN(ctx context.Context, vid int) error {
+	return a.driver.addVLAN(ctx, vid, a.hash)
+}
 
-	for _, vid := range removed {
-		step2[vid] = model.Vlan{
-			ID:    vid,
-			Ports: ignoredPorts(),
-		}
-	}
+// SetMembership executes the hiddenMem membership POST for one VLAN.
+func (a vlanApplier) SetMembership(ctx context.Context, vid int, ports map[int]model.PortMembership) error {
+	return a.driver.setVLANMembership(ctx, vid, ports, a.hash)
+}
 
-	for _, port := range preservedPorts {
-		pvid := current.PVIDs[port]
-		vlan := step2[pvid]
-		if vlan.Ports == nil {
-			vlan = current.VLANs[pvid]
-		}
-		if vlan.Ports == nil {
-			vlan = model.Vlan{ID: pvid, Ports: ignoredPorts()}
-		}
-		vlan.Ports[port] = current.VLANs[pvid].Ports[port]
-		step2[pvid] = vlan
-	}
+// SetPVIDs executes the batched PVID form for one vid. BEHAVIOR CHANGE
+// vs the inline pipeline: the plan emits SetPVIDs ops sorted by vid
+// (with ports sorted), whereas the old code iterated BatchPVIDs' map in
+// Go's random order, so identical applies could send the set-pvid
+// forms in different order run to run. Wire order is now deterministic.
+func (a vlanApplier) SetPVIDs(ctx context.Context, vid int, ports []int) error {
+	return a.driver.setPortsPVID(ctx, ports, vid, a.hash)
+}
 
-	removed = model.PreserveRemovedVLANs(removed, current, preservedPorts)
-
-	for _, vid := range model.AddedVLANs(current, desired) {
-		if err := d.addVLAN(ctx, vid, hash); err != nil {
-			return err
-		}
-	}
-
-	for _, vid := range sortedVLANMapKeys(step1) {
-		if err := d.setVLANMembership(ctx, vid, step1[vid].Ports, hash); err != nil {
-			return err
-		}
-	}
-
-	for vid, ports := range model.BatchPVIDs(desired) {
-		if err := d.setPortsPVID(ctx, ports, vid, hash); err != nil {
-			return err
-		}
-	}
-
-	for _, vid := range sortedVLANMapKeys(step2) {
-		if err := d.setVLANMembership(ctx, vid, step2[vid].Ports, hash); err != nil {
-			return err
-		}
-	}
-
-	if err := d.deleteVLANs(ctx, removed, hash); err != nil {
-		return err
-	}
-
-	return nil
+// DeleteVLANs executes today's single batched delete form carrying all
+// vids. The plan hands the vids sorted ascending (the old inline
+// pipeline did too, via RemovedVLANs).
+func (a vlanApplier) DeleteVLANs(ctx context.Context, vids []int) error {
+	return a.driver.deleteVLANs(ctx, vids, a.hash)
 }
 
 func (d *Driver) addVLAN(ctx context.Context, vid int, hash string) error {
@@ -231,60 +206,4 @@ func encodeMembership(ports map[int]model.PortMembership) string {
 		}
 	}
 	return string(encoded)
-}
-
-func ignoredPorts() map[int]model.PortMembership {
-	ports := make(map[int]model.PortMembership, portCount)
-	for port := 1; port <= portCount; port++ {
-		ports[port] = model.PortMembershipIgnored
-	}
-	return ports
-}
-
-func mergedMembership(current, desired map[int]model.PortMembership) map[int]model.PortMembership {
-	result := ignoredPorts()
-	for port := 1; port <= portCount; port++ {
-		left := current[port]
-		right := desired[port]
-		result[port] = minMembership(left, right)
-	}
-	return result
-}
-
-func minMembership(left, right model.PortMembership) model.PortMembership {
-	order := map[model.PortMembership]int{
-		model.PortMembershipUntagged: 1,
-		model.PortMembershipTagged:   2,
-		model.PortMembershipIgnored:  3,
-	}
-
-	if order[left] <= order[right] {
-		return left
-	}
-	return right
-}
-
-func intersect(left, right []int) []int {
-	set := make(map[int]struct{}, len(left))
-	for _, value := range left {
-		set[value] = struct{}{}
-	}
-
-	result := make([]int, 0, len(right))
-	for _, value := range right {
-		if _, ok := set[value]; ok {
-			result = append(result, value)
-		}
-	}
-
-	return result
-}
-
-func sortedVLANMapKeys(vlans map[int]model.Vlan) []int {
-	keys := make([]int, 0, len(vlans))
-	for vid := range vlans {
-		keys = append(keys, vid)
-	}
-	slices.Sort(keys)
-	return keys
 }
