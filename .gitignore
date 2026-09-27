@@ -25,3 +25,11 @@ GS108Ev3*.zip
 
 # Ghidra reverse-engineering workspace (local analysis scratch)
 ghidra.*
+
+# BEGIN oh-my-opencode-slim worktrees
+.slim/worktrees/
+.slim/worktrees.json
+# END oh-my-opencode-slim worktrees
+
+# Live-bench remote-deploy staging (built provider/tofu binaries, mirror layout)
+examples/**/.deploy-staging/
