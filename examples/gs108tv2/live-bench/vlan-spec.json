@@ -1,0 +1,32 @@
+{
+  "vlans": [
+    {
+      "id": 1,
+      "ports": {
+        "1": "untagged",
+        "2": "untagged",
+        "5": "untagged",
+        "6": "untagged",
+        "7": "untagged",
+        "8": "untagged"
+      }
+    },
+    {
+      "id": 10,
+      "ports": {
+        "3": "untagged",
+        "4": "untagged"
+      }
+    }
+  ],
+  "pvids": {
+    "1": 1,
+    "2": 1,
+    "3": 10,
+    "4": 10,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1
+  }
+}

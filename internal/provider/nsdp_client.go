@@ -223,15 +223,20 @@ func nsdpModelDialectKey(model string) string {
 //
 // Supported v1 surface (live-verified 2026-09-15): switch identity and
 // firmware facts (GetIdentity), system name read/write, IP config
-// TLVs, capability word, flat ASCII serial (TLV 0x0019). Everything
-// else waits for the NSDP text-config transport (nsdpTftpOpen /
-// NSDP_TLV_CONFIG_FILE_VALIDATION path in the same firmware).
+// TLVs, capability word, flat ASCII serial (TLV 0x0019).
+//
+// Post-milestone-3 routing notes: 802.1Q VLAN membership management no
+// longer needs NSDP at all (the gs108tv2 vlan_state family runs over
+// the FASTPATH text-config channel; see internal/client/gs108tv2 and
+// textcfg_switch_transport.go), while switch settings and port-based
+// VLAN management for this generation are still UNSUPPORTED anywhere —
+// the families this guard still covers keep refusing here.
 func nsdpV1Guard(client nsdpClient, family string) error {
 	if client.IsV1() {
 		return &providerOperationError{
 			summary: fmt.Sprintf("%s is not supported on this switch over NSDP", family),
 			detail: fmt.Sprintf(
-				"This switch's firmware speaks the legacy NSDP v1 dialect (model gs108tv2-class), which only carries flat scalar attributes: switch facts, system name, and IP configuration. The v1 engine has no %s datatypes, so the provider refuses the operation instead of hanging it as a protocol timeout. VLAN and port management for this switch generation will arrive through the switch's text-config transport.",
+				"This switch's firmware speaks the legacy NSDP v1 dialect (model gs108tv2-class), which only carries flat scalar attributes: switch facts, system name, and IP configuration. The v1 engine has no %s datatypes, so the provider refuses the operation instead of hanging it as a protocol timeout. 802.1Q VLAN membership management for this model now runs through the switch's text-config channel (`netgear_plus_vlan_state` with provider model gs108tv2 and host set); switch settings and port-based VLAN stay unsupported on this generation over NSDP.",
 				family,
 			),
 		}

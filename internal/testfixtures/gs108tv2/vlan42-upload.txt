@@ -1,0 +1,133 @@
+0x4e470x010x00GS108Tv2            5.4.2.36            0x000000000x00000000000000
+
+! The line above is the NSDP Text Configuration header. DO NOT EDIT THIS HEADER
+
+!Current Configuration:
+
+!
+
+!System Description "GS108Tv2"
+
+!System Software Version "5.4.2.36"
+
+!System Up Time          "0 days 17 hrs 16 mins 46 secs"
+
+!Additional Packages     FASTPATH QOS
+
+!Current SNTP Synchronized Time: Not Synchronized
+
+!
+
+vlan database
+vlan 42
+
+exit
+
+configure
+
+snmp-server sysname " "
+
+!
+
+sntp client mode unicast
+
+users passwd "admin" encrypted 0a51d780be1a0240b8cc7c69fe0479dbf07644e1094b25fb43ebe2fa72f649e4
+
+authentication login "defaultList"  local
+
+lineconfig
+
+exit
+
+spanning-tree configuration name "8C-3B-AD-2C-E9-7D"
+
+voip status
+
+voip oui 00:01:E3 desc SIEMENS
+
+voip oui 00:03:6B desc CISCO1
+
+voip oui 00:12:43 desc CISCO2
+
+voip oui 00:0F:E2 desc H3C
+
+voip oui 00:60:B9 desc NITSUKO
+
+voip oui 00:D0:1E desc PINTEL
+
+voip oui 00:E0:75 desc VERILINK
+
+voip oui 00:E0:BB desc 3COM
+
+voip oui 00:04:0D desc AVAYA1
+
+voip oui 00:1B:4F desc AVAYA2
+
+ip dhcp filtering
+
+interface 0/1
+
+exit
+
+interface 0/2
+
+exit
+
+interface 0/3
+
+exit
+
+interface 0/4
+
+exit
+
+interface 0/5
+
+exit
+
+interface 0/6
+
+exit
+
+interface 0/7
+
+exit
+
+interface 0/8
+
+exit
+
+interface 3/1
+
+no snmp trap link-status
+
+lacp collector max-delay 0
+
+exit
+
+interface 3/2
+
+no snmp trap link-status
+
+lacp collector max-delay 0
+
+exit
+
+interface 3/3
+
+no snmp trap link-status
+
+lacp collector max-delay 0
+
+exit
+
+interface 3/4
+
+no snmp trap link-status
+
+lacp collector max-delay 0
+
+exit
+
+exit
+

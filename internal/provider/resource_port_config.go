@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
+	"github.com/lucavb/terraform-provider-netgear-plus/internal/client/gs108tv2"
 	"github.com/lucavb/terraform-provider-netgear-plus/internal/nsdp"
 )
 
@@ -53,8 +54,10 @@ type portConfigResource struct {
 }
 
 type portConfigResourceModel struct {
-	ID    types.String          `tfsdk:"id"`
-	Ports []portConfigPortModel `tfsdk:"ports"`
+	ID             types.String          `tfsdk:"id"`
+	Ports          []portConfigPortModel `tfsdk:"ports"`
+	RebootToApply  types.Bool            `tfsdk:"reboot_to_apply"`
+	ChangesPending types.Bool            `tfsdk:"changes_pending"`
 }
 
 type portConfigPortModel struct {
@@ -78,11 +81,24 @@ func (r *portConfigResource) Metadata(_ context.Context, req resource.MetadataRe
 
 func (r *portConfigResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = rschema.Schema{
-		Description: "Authoritative per-port configuration for all 8 ports of an NSDP-managed switch: admin enable, flow control, per-port QoS priority, and ingress/egress rate limits.",
+		Description: "Authoritative per-port configuration for all 8 ports of a switch: admin enable, flow control, per-port QoS priority, and ingress/egress rate limits. Runs over NSDP block SETs on gs108ev3 and over the FASTPATH text-config channel on gs108tv2 (where qos_priority/ingress_rate/egress_rate refuse non-default values until that firmware's grammar is pinned).",
 		Attributes: map[string]rschema.Attribute{
 			"id": rschema.StringAttribute{
 				Computed:    true,
-				Description: "Stable switch identifier (nsdp@<agent MAC>).",
+				Description: "Stable switch identifier (nsdp@<agent MAC> over NSDP; gs108tv2@<host> over the text-config channel).",
+			},
+			"reboot_to_apply": rschema.BoolAttribute{
+				// Optional + StaticBool(false) default resolves to a
+				// known plan value (no Computed perpetual diff); the
+				// framework merely requires the flag for Defaults.
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: "gs108tv2 only. When `true`, every apply that stages changes also reboots the switch after staging and waits for it to come back with the staged startup-config intact — the changes are ACTIVE when Terraform reports success. When `false`, gs108tv2 applies stage the startup-config without rebooting. gs108ev3 is refused (its NSDP SETs apply live). Leaving it true reboots the switch on later unrelated diffs too.",
+			},
+			"changes_pending": rschema.BoolAttribute{
+				Computed:    true,
+				Description: "gs108tv2: true while the last Terraform apply staged changes without a Terraform-driven reboot. false after a rebooting apply, on no-op applies, and on gs108ev3. Reads pass the prior value through: running state is unobservable on gs108tv2 between applies, so it clears on the next apply and says nothing about an out-of-band reboot.",
 			},
 		},
 		Blocks: map[string]rschema.Block{
@@ -175,6 +191,44 @@ func (r *portConfigResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 
+	// gs108tv2: port settings read over the composite text-config
+	// transport (startup-config decode). Routing precedes the NSDP
+	// branch, so the nsdpV1Guard refusal never fires on this model.
+	if r.data.isGS108Tv2Model() {
+		if err := withSwitchTransport(ctx, r.data, func(transport switchTransport) error {
+			reader, ok := transport.(portSettingsTransport)
+			if !ok {
+				return fmt.Errorf("the gs108tv2 port_config transport cannot read port settings")
+			}
+			actual, err := reader.ReadPortSettings(ctx)
+			if err != nil {
+				return operationError("Read port configuration failed", err)
+			}
+
+			// Preserve a pre-existing ID (import passthrough); compute
+			// it when absent (gs108tv2@<host> convention).
+			id := current.ID
+			if id.IsNull() || id.IsUnknown() || strings.TrimSpace(id.ValueString()) == "" {
+				id = types.StringValue(transport.ResourceID())
+			}
+
+			readState, err := flattenPortConfigs(textPortSettingsToConfigs(actual), id)
+			if err != nil {
+				return operationError("Flatten port configuration failed", err)
+			}
+			// Running state is unobservable on gs108tv2 between
+			// applies: pass both plan-owned flags through unchanged.
+			readState.RebootToApply = current.RebootToApply
+			readState.ChangesPending = current.ChangesPending
+
+			resp.Diagnostics.Append(resp.State.Set(ctx, &readState)...)
+			return nil
+		}); err != nil {
+			addNSDPOperationError(&resp.Diagnostics, err)
+		}
+		return
+	}
+
 	if err := withNSDPClient(ctx, r.data, func(c nsdpClient) error {
 		if err := nsdpV1Guard(c, "Port configuration management"); err != nil {
 			return err
@@ -195,6 +249,11 @@ func (r *portConfigResource) Read(ctx context.Context, req resource.ReadRequest,
 		if err != nil {
 			return operationError("Flatten port configuration failed", err)
 		}
+		// Pass-through flags on Read (running NSDP state applied live;
+		// changes_pending always false on gs108ev3, values preserved
+		// for plan-owned fields).
+		readState.RebootToApply = current.RebootToApply
+		readState.ChangesPending = current.ChangesPending
 
 		resp.Diagnostics.Append(resp.State.Set(ctx, &readState)...)
 		return nil
@@ -233,6 +292,23 @@ func (r *portConfigResource) ImportState(ctx context.Context, req resource.Impor
 func (r *portConfigResource) apply(ctx context.Context, plan portConfigResourceModel, target *tfsdk.State, diags *diag.Diagnostics) {
 	if r.data == nil {
 		diags.AddError("Provider not configured", "Configure the `netgear_plus` provider before managing `netgear_plus_port_config`.")
+		return
+	}
+
+	// reboot_to_apply preflight for every model: gs108ev3 (and any
+	// other non-text-config model) simply refuses the option; gs108tv2
+	// additionally refuses while the reboot endpoint sentinel is
+	// unpinned (phase 0b). Zero transport work either way.
+	if err := preflightRebootToApply(r.data, plan.RebootToApply); err != nil {
+		addNSDPOperationError(diags, err)
+		return
+	}
+
+	// gs108tv2: the port configuration rides the composite text-config
+	// transport (routing precedes the NSDP branch, so nsdpV1Guard never
+	// fires on this model).
+	if r.data.isGS108Tv2Model() {
+		r.applyTextcfg(ctx, plan, target, diags)
 		return
 	}
 
@@ -294,6 +370,11 @@ func (r *portConfigResource) apply(ctx context.Context, plan portConfigResourceM
 		if err != nil {
 			return operationError("Flatten verified port configuration failed", err)
 		}
+		// gs108ev3 semantics: NSDP SETs apply LIVE (nothing pending), and
+		// the plan flags land in state unchanged (reboot_to_apply never
+		// true here — the apply() preflight refuses it for this model).
+		nextState.RebootToApply = normalizedBool(plan.RebootToApply)
+		nextState.ChangesPending = types.BoolValue(false)
 
 		diags.Append(target.Set(ctx, &nextState)...)
 		return nil
@@ -841,4 +922,272 @@ func addNSDPOperationError(diags diagnosticAdder, err error) {
 	}
 
 	diags.AddError(summary, detail)
+}
+
+// ---------------------------------------------------------------------------
+// gs108tv2 text-config path (milestone 3): the per-port configuration
+// rides the composite transport. Same diff→apply→verify shape as the
+// NSDP branch, different verify truth: the startup-config decode is the
+// single source of truth before (and after) the switch's ingest window,
+// and running state changes only on reboot.
+// ---------------------------------------------------------------------------
+
+// applyTextcfg is the gs108tv2 apply shared by Create and Update.
+//
+// Preflight order (all BEFORE any staging and any transport work):
+//  1. provider-layer capability refusals: for every port requesting a
+//     NON-DEFAULT value of an Unsupported attribute (qos_priority !=
+//     "low", ingress_rate/egress_rate != "none"), a typed per-port
+//     diagnostic naming port, attribute, requested value, and the
+//     capability reason — mirroring the driver's
+//     ErrUnsupportedAttribute pre-upload refusals but surfaced as
+//     coherent per-port diagnostics instead of the first error;
+//  2. the gs108tv2 serial-pin rail (requireGS108Tv2SerialPin);
+//  3. the reboot endpoint preflight already ran in apply() above.
+func (r *portConfigResource) applyTextcfg(ctx context.Context, plan portConfigResourceModel, target *tfsdk.State, diags *diag.Diagnostics) {
+	desired, err := expandPortConfigs(ctx, plan)
+	if err != nil {
+		diags.AddError("Invalid port configuration", err.Error())
+		return
+	}
+
+	desiredSettings := configsToTextPortSettings(desired)
+
+	// 1. Capability refusals, per port, per attribute.
+	for _, refusal := range portCapabilityRefusals(desiredSettings) {
+		diags.AddError(refusal.summary, refusal.detail)
+	}
+	if diags.HasError() {
+		return
+	}
+
+	// 2. The same serial-pin safety rail vlan_state uses (fail-closed
+	// before any staging — the whole-startup-config rewrite must never
+	// land on an unpinned target).
+	if err := requireGS108Tv2SerialPin(r.data); err != nil {
+		addNSDPOperationError(diags, err)
+		return
+	}
+
+	if err := withSwitchTransport(ctx, r.data, func(transport switchTransport) error {
+		reader, ok := transport.(portSettingsTransport)
+		if !ok {
+			return fmt.Errorf("the gs108tv2 transport cannot read port settings")
+		}
+		applier, ok := transport.(detailedPortSettingsApplier)
+		if !ok {
+			return fmt.Errorf("the gs108tv2 transport cannot apply port settings")
+		}
+
+		current, err := reader.ReadPortSettings(ctx)
+		if err != nil {
+			return operationError("Read current port configuration failed", err)
+		}
+		changed := !textPortSettingsEqual(current, desiredSettings)
+
+		if !changed {
+			diags.AddWarning(
+				"Port configuration already in sync",
+				"All 8 ports already match the requested configuration in the staged startup-config; no configuration restore was sent to the switch.",
+			)
+		}
+
+		outcome, err := applier.ApplyPortSettingsDetailed(ctx, desiredSettings)
+		if err != nil {
+			return operationError("Apply port configuration failed", err)
+		}
+
+		verified, err := reader.ReadPortSettings(ctx)
+		if err != nil {
+			return operationError("Read back port configuration failed", err)
+		}
+		if !textPortSettingsEqual(verified, desiredSettings) {
+			return &providerOperationError{
+				summary: "Post-apply verification failed",
+				detail: fmt.Sprintf(
+					"switch port configuration did not converge to the requested configuration for %s: %s",
+					transport.ResourceID(),
+					describeTextPortSettingsDrift(desiredSettings, verified),
+				),
+			}
+		}
+
+		// changes_pending + reboot_to_apply. RECOVERY SHAPE after a
+		// failed reboot: the resource state is NOT written (this error
+		// path returns before target.Set) — the next apply sends only
+		// the driver's idempotent short-circuit (the startup-config
+		// already decodes Equal to the desired port map, zero restore
+		// POSTs) followed by RebootAndWait again. The reboot is the
+		// only retried side effect.
+		changesPending := changed
+		if changed && rebootToApplyEnabled(plan.RebootToApply) {
+			rebooter, ok := transport.(textcfgRebooter)
+			if !ok {
+				return fmt.Errorf("the gs108tv2 transport cannot reboot")
+			}
+			if _, err := rebooter.Reboot(ctx); err != nil {
+				return operationError("gs108tv2: reboot for apply failed", err)
+			}
+			// Success: the change is ACTIVE, not pending.
+			changesPending = false
+		}
+
+		nextState, err := flattenPortConfigs(textPortSettingsToConfigs(verified), types.StringValue(transport.ResourceID()))
+		if err != nil {
+			return operationError("Flatten verified port configuration failed", err)
+		}
+		nextState.RebootToApply = normalizedBool(plan.RebootToApply)
+		nextState.ChangesPending = types.BoolValue(changesPending)
+
+		diags.Append(target.Set(ctx, &nextState)...)
+
+		addGS108Tv2StagedWarnings(diags, outcome, "Port configuration changes", changesPending)
+		return nil
+	}); err != nil {
+		addNSDPOperationError(diags, err)
+	}
+}
+
+// portCapabilityRefusals mirrors the driver's capability table
+// (gs108tv2.validatePortSettings) at the provider layer: for every
+// port requesting a NON-DEFAULT value of an Unsupported attribute it
+// returns a typed per-port refusal (an ErrUnsupportedAttribute as the
+// cause). The default values render by absence and are accepted.
+func portCapabilityRefusals(desired map[int]gs108tv2.PortSettings) []*providerOperationError {
+	var refusals []*providerOperationError
+
+	check := func(port int, attribute, value, def string) {
+		capability, ok := gs108tv2.PortSettingCapabilities[attribute]
+		if !ok || capability.Status != gs108tv2.AttributeUnsupported || value == def {
+			return
+		}
+		typed := &gs108tv2.ErrUnsupportedAttribute{Port: port, Attribute: attribute, Value: value, Reason: capability.Reason}
+		refusals = append(refusals, &providerOperationError{
+			summary: fmt.Sprintf("Port %d: %q is not supported on gs108tv2 over the text-config channel", port, attribute),
+			detail: fmt.Sprintf(
+				"The requested %s for port %d is %q, but port %d has no %s grammar on this FASTPATH firmware yet: only the default value %q renders (its absence line IS the value). %s. Keep the default for port %d, or drop the attribute override.",
+				attributeNameForHumans(attribute), port, typed.Value, port, attribute, def, capability.Reason, port,
+			),
+			cause: typed,
+		})
+	}
+
+	for port := 1; port <= portConfigPortCount; port++ {
+		ps, ok := desired[port]
+		if !ok {
+			refusals = append(refusals, &providerOperationError{
+				summary: fmt.Sprintf("Port %d missing from the gs108tv2 port configuration", port),
+				detail:  "The text-config port map must cover all 8 ports (missing entries are refused, not defaulted); expandPortConfigs already guarantees this — this refusal is the defensive mirror of the driver's check.",
+			})
+			continue
+		}
+		check(port, "qos_priority", ps.QoSPriority, defaultPortQoSPriority)
+		check(port, "ingress_rate", ps.IngressRate, defaultPortRateLimit)
+		check(port, "egress_rate", ps.EgressRate, defaultPortRateLimit)
+	}
+	return refusals
+}
+
+// attributeNameForHumans renders attribute keys in the refusal text
+// (identity function today, kept for future key renames).
+func attributeNameForHumans(attribute string) string {
+	return attribute
+}
+
+// configsToTextPortSettings maps the provider portConfig map (NSDP enum
+// fields) onto the driver's text-config value set (schema vocabulary
+// strings; the driver renders defaults by absence).
+func configsToTextPortSettings(configs map[int]portConfig) map[int]gs108tv2.PortSettings {
+	out := make(map[int]gs108tv2.PortSettings, portConfigPortCount)
+	for port := 1; port <= portConfigPortCount; port++ {
+		cfg := configs[port]
+		qos, _ := qosPriorityToString(cfg.QoSPriority)
+		ingress, _ := bandwidthLimitToString(cfg.IngressRate)
+		egress, _ := bandwidthLimitToString(cfg.EgressRate)
+		out[port] = gs108tv2.PortSettings{
+			Enabled:     cfg.Enabled,
+			FlowControl: cfg.FlowControl,
+			QoSPriority: qos,
+			IngressRate: ingress,
+			EgressRate:  egress,
+		}
+	}
+	return out
+}
+
+// textPortSettingsToConfigs maps the driver's PortSettings decode back
+// onto the provider model (enum strings → wire enums; the decode only
+// ever produces the schema vocabulary, so the mappers cannot fail
+// there — errors are impossible-value defenses with hard errors).
+func textPortSettingsToConfigs(ports map[int]gs108tv2.PortSettings) map[int]portConfig {
+	configs := make(map[int]portConfig, portConfigPortCount)
+	for port := 1; port <= portConfigPortCount; port++ {
+		ps, ok := ports[port]
+		if !ok {
+			ps = gs108tv2.DefaultPortSettings()
+		}
+		qos, err := qosPriorityFromString(ps.QoSPriority, port)
+		if err != nil {
+			qos = 4 // nsdp.QoSPriority low — defensive, unreachable via the codec
+		}
+		ingress, err := bandwidthLimitFromString(ps.IngressRate, port, "ingress_rate")
+		if err != nil {
+			ingress = nsdp.BandwidthNone
+		}
+		egress, err := bandwidthLimitFromString(ps.EgressRate, port, "egress_rate")
+		if err != nil {
+			egress = nsdp.BandwidthNone
+		}
+		configs[port] = portConfig{
+			Port:        port,
+			Enabled:     ps.Enabled,
+			FlowControl: ps.FlowControl,
+			QoSPriority: qos,
+			IngressRate: ingress,
+			EgressRate:  egress,
+		}
+	}
+	return configs
+}
+
+// textPortSettingsEqual compares two full 1..8 gs108tv2.PortSettings
+// maps field by field (the codec's comparator is package-internal).
+func textPortSettingsEqual(a, b map[int]gs108tv2.PortSettings) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for port, sa := range a {
+		sb, ok := b[port]
+		if !ok || sa != sb {
+			return false
+		}
+	}
+	return true
+}
+
+// describeTextPortSettingsDrift renders the human diff between the
+// desired and the re-read port settings for verification errors.
+func describeTextPortSettingsDrift(desired, actual map[int]gs108tv2.PortSettings) string {
+	var deltas []string
+	for port := 1; port <= portConfigPortCount; port++ {
+		want, wok := desired[port]
+		got, gok := actual[port]
+		if !wok || !gok {
+			deltas = append(deltas, fmt.Sprintf("port %d missing (want=%v got=%v)", port, wok, gok))
+			continue
+		}
+		if want != got {
+			deltas = append(deltas, fmt.Sprintf("port %d: enabled=%v/%v flow_control=%v/%v qos=%q/%q ingress=%q/%q egress=%q/%q",
+				port,
+				want.Enabled, got.Enabled,
+				want.FlowControl, got.FlowControl,
+				want.QoSPriority, got.QoSPriority,
+				want.IngressRate, got.IngressRate,
+				want.EgressRate, got.EgressRate))
+		}
+	}
+	if len(deltas) == 0 {
+		return "identical"
+	}
+	return strings.Join(deltas, "; ")
 }

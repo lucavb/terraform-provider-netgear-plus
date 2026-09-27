@@ -17,6 +17,8 @@ This is usually the first data source to run on a real device because it gives y
 data "netgear_plus_switch" "target" {}
 ```
 
+On `model = "gs108tv2"` this data source reads identity over NSDP v1 only (switch name, MAC, serial, firmware — no VLAN or port datatypes exist on that dialect), and it refuses with an actionable error unless the provider `agent_mac` attribute is set. Set `agent_mac` to the switch's MAC; the config backup (`netgear_plus_switch_config`) carries the same address in its `spanning-tree configuration name` line if you need to look it up.
+
 You can use the returned serial number to guard live changes:
 
 ```hcl

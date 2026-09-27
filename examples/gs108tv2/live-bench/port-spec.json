@@ -1,0 +1,5 @@
+{
+  "ports": [
+    { "port": 6, "enabled": false }
+  ]
+}

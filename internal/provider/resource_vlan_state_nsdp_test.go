@@ -202,6 +202,14 @@ func TestVLANStateNSDPCreateAppliesAndVerifies(t *testing.T) {
 	if len(state.VLANs) != 2 {
 		t.Fatalf("state should carry VLANs 1 and 10, got %+v", state.VLANs)
 	}
+	// gs108ev3 applies LIVE over NSDP: nothing pending, and the default
+	// flag values land in state.
+	if state.ChangesPending.IsNull() || state.ChangesPending.ValueBool() {
+		t.Fatal("an ev3 apply must set changes_pending=false")
+	}
+	if state.RebootToApply.ValueBool() {
+		t.Fatal("reboot_to_apply must default to false on ev3")
+	}
 }
 
 func TestVLANStateNSDPConvergenceSendsNoSets(t *testing.T) {

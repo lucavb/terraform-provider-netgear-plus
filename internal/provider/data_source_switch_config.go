@@ -44,6 +44,7 @@ type switchConfigDataSource struct {
 type switchConfigDataSourceModel struct {
 	ID                    types.String `tfsdk:"id"`
 	Content               types.String `tfsdk:"content"`
+	Canonical             types.String `tfsdk:"canonical"`
 	SystemDescription     types.String `tfsdk:"system_description"`
 	SystemSoftwareVersion types.String `tfsdk:"system_software_version"`
 }
@@ -69,7 +70,11 @@ func (d *switchConfigDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 			},
 			"content": dschema.StringAttribute{
 				Computed:    true,
-				Description: "The verbatim text configuration file, with the NSDP magic header line intact (the firmware validates this header on restore).",
+				Description: "The verbatim text configuration file, with the NSDP magic header line intact (the firmware validates this header on restore). Note: content ALWAYS changes between successive reads, because the file carries a `!System Up Time` stamp that differs on every export — never use content for equality/drift compares.",
+			},
+			"canonical": dschema.StringAttribute{
+				Computed:    true,
+				Description: "The startup-config bytes with the `!System Up Time` stamp line excluded (the fastpath config's canonical form). This is the stable comparand: two reads that agree except for the uptime stamp have identical canonical values, while verbatim `content` always differs between reads.",
 			},
 			"system_description": dschema.StringAttribute{
 				Computed:    true,
@@ -157,6 +162,7 @@ func (d *switchConfigDataSource) Read(ctx context.Context, req datasource.ReadRe
 	state := switchConfigDataSourceModel{
 		ID:                    types.StringValue(fmt.Sprintf("fastpath@%s/startup-config", host)),
 		Content:               types.StringValue(string(tc.Raw)),
+		Canonical:             types.StringValue(string(tc.CanonicalBytes())),
 		SystemDescription:     types.StringValue(tc.SystemDescription),
 		SystemSoftwareVersion: types.StringValue(tc.SystemSoftwareVersion),
 	}

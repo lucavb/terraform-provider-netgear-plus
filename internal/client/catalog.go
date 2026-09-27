@@ -14,12 +14,18 @@ const (
 
 	// ModelGS108Tv2 is the GS108Tv2/GS110TPv2-class "ProSAFE Smart
 	// Managed" family running FASTPATH firmware (e.g. v5.4.2.36,
-	// live-verified 2026-09-15). It is NSDP-ONLY: the legacy NSDP v1
-	// dialect (UDP 63323/63324) carries identity/firmware facts, system
-	// name and IP configuration; its engine has no VLAN/port datatypes
-	// (see nsdpV1Guard). There is no HTTP web-UI driver for this model —
+	// live-verified 2026-09-15). The legacy NSDP v1 dialect (UDP
+	// 63323/63324) carries identity/firmware facts, system name and IP
+	// configuration; its engine has no VLAN/port datatypes (see
+	// nsdpV1Guard). VLAN state for this model runs over its FASTPATH
+	// text-config channel, OUTSIDE this package:
+	// internal/client/gs108tv2 carries the emweb driver (startup-config
+	// save/mutate/restore + structural verify), and
+	// internal/provider/textcfg_switch_transport.go composes it into
+	// the provider transport. client.NewDriver intentionally stays
+	// ev3-only — withSwitchTransport wires the gs108tv2 branches — and
 	// the firmware's emweb/FASTPATH UI is unrelated to the gs108ev3
-	// Plus pages.
+	// Plus pages, so no gs108ev3-style HTTP driver can ever serve it.
 	ModelGS108Tv2 = "gs108tv2"
 )
 

@@ -58,7 +58,10 @@ func (d *switchDataSource) Read(ctx context.Context, _ datasource.ReadRequest, r
 		return
 	}
 
-	if err := withSwitchTransport(ctx, d.data, func(transport switchTransport) error {
+	// netgear_plus_switch is the IDENTITY seam: on model gs108tv2 it
+	// rides NSDP v1 identity (agent_mac), not the text-config VLAN
+	// channel. See withSwitchIdentityTransport.
+	if err := withSwitchIdentityTransport(ctx, d.data, func(transport switchTransport) error {
 		facts, err := transport.ReadSwitchFacts(ctx)
 		if err != nil {
 			return operationError("Read switch facts failed", err)

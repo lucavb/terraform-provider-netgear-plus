@@ -9,6 +9,8 @@ description: |-
 
 Use `netgear_plus_vlan_state` to read the live VLAN and PVID state from the target switch before managing it authoritatively.
 
+On `model = "gs108tv2"` this data source reads the **startup config** over the FASTPATH text-config channel (via the provider `host` attribute): running VLAN state is not readable on that firmware, so the values returned are what the switch will run after its next reboot, not necessarily what it is running right now. See the managing resource's [gs108tv2 section](../resources/vlan_state.md).
+
 ## Example Usage
 
 ```hcl

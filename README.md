@@ -1,12 +1,12 @@
 # terraform-provider-netgear-plus
 
-Terraform provider for Netgear Plus switches, currently scoped to `GS108Ev3`.
+Terraform provider for Netgear Plus switches, covering the `GS108Ev3` Plus line and the `gs108tv2` FASTPATH line (GS108Tv2/GS110TPv2-class).
 
 ## Status
 
 This project is usable for careful, operator-driven testing, but it is still an early provider.
 
-- Supported model: `GS108Ev3`
+- Supported models: `GS108Ev3` (live HTTP/NSDP applies) and `gs108tv2` (GS108Tv2/GS110TPv2-class FASTPATH firmware; identity over NSDP v1, VLAN/port management via the text-config channel — stage-to-startup semantics)
 - Terraform source: `lucavb/netgear-plus`
 - OpenTofu source: `registry.terraform.io/lucavb/netgear-plus`
 - Current maturity: prototype, not production-grade
@@ -15,7 +15,9 @@ This project is usable for careful, operator-driven testing, but it is still an 
 
 - reads switch identity and firmware facts with `netgear_plus_switch`
 - reads live VLAN and PVID state with `netgear_plus_vlan_state`
-- manages authoritative VLAN membership and PVID state with `netgear_plus_vlan_state`
+- reads the gs108tv2 startup-config (verbatim + uptime-canonical copy) with `netgear_plus_switch_config`
+- manages authoritative VLAN membership and PVID state with `netgear_plus_vlan_state` (gs108ev3: live; gs108tv2: staged into the startup-config, active on the next reboot)
+- manages authoritative per-port configuration with `netgear_plus_port_config` (gs108ev3: all five attributes over NSDP; gs108tv2: enable + flow control over the text-config channel, qos/rate overrides refuse until that firmware's grammar is pinned)
 
 ## Example
 
@@ -117,7 +119,7 @@ This provider is optimized for correctness over breadth on `GS108Ev3`.
 
 ## Session Safety
 
-The provider serializes all operations per switch host so `plan`, `read`, and `apply` do not open overlapping provider-managed sessions to the same device.
+The provider serializes all operations per switch host so `plan`, `read`, and `apply` do not open overlapping provider-managed sessions to the same device. That lock exists inside one Terraform process only: two separate `terraform apply` runs against the same switch can interleave with each other (on gs108tv2, whole-file read-modify-write cycles of the startup-config), so serialize applies against one switch operationally (see `docs/index.md`).
 
 The provider also intentionally waits `5s` between requests to the same switch by default. This is a deliberate safety throttle for `GS108Ev3` firmware, which is prone to temporary login lockouts when clients send requests too quickly. If a live `plan` or `apply` feels slow, that delay is there to protect the switch rather than because the provider is doing unnecessary work.
 
@@ -139,8 +141,10 @@ The checked-in live example stays focused on local operator workflows such as lo
 
 ## Known Limits
 
-- `GS108Ev3` is the only supported model.
-- The provider uses the switch's HTTP management surface as implemented today.
+- `gs108ev3` applies live over the switch's HTTP management surface; `gs108tv2` stages into the startup-config (running state changes only on reboot, and is unreadable over the config channel in between).
+- On `gs108tv2`, `reboot_to_apply = true` currently refuses until the reboot endpoint is pinned for FASTPATH 5.4.2.36 (live pinning pending); staging works without it.
+- On `gs108tv2`, `netgear_plus_port_config` manages `enabled` and `flow_control` only; non-default `qos_priority`/`ingress_rate`/`egress_rate` values refuse with a typed per-port error until that firmware's text-config grammar is pinned.
+- The per-device lock and pacing are per Terraform process. Serialize applies against one switch when running concurrent pipelines (see `docs/index.md`).
 - Write operations are multi-step and not transactional.
 - Import identity still uses `model@host`; the serial-number pin is the live-apply safety mechanism.
 - The checked-in tests cover parsing and mock-driver behavior, not full hardware acceptance.

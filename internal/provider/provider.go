@@ -58,6 +58,12 @@ type providerData struct {
 	deviceKey   string // unified mutex/pacer key, precomputed at Configure time
 	nsdpFactory func(nsdp.Options) (nsdpClient, error)
 	cachedNSDP  *cachedNSDPClient
+
+	// gs108tv2 text-config plumbing (see textcfg_switch_transport.go).
+	// The text-config driver lifecycle is independent of both the HTTP
+	// driver session and the NSDP client above.
+	textcfgFactory func(textcfgDriverRequest) (textcfgDriver, error)
+	cachedTextcfg  *cachedTextcfgDriver
 }
 
 type cachedDriverSession struct {
@@ -126,7 +132,7 @@ func (p *netgearPlusProvider) Schema(_ context.Context, _ provider.SchemaRequest
 			},
 			"model": pschema.StringAttribute{
 				Optional:    true,
-				Description: "Switch model to bind to: 'gs108ev3' (Plus line, HTTP web UI + NSDP v2) or 'gs108tv2' (GS108Tv2/GS110TPv2-class FASTPATH line, NSDP v1 only — requires agent_mac; no web-UI transport exists).",
+				Description: "Switch model to bind to: 'gs108ev3' (Plus line, HTTP web UI + NSDP v2) or 'gs108tv2' (GS108Tv2/GS110TPv2-class FASTPATH line). On 'gs108tv2' VLAN state management and the config backup run over the switch's text-config channel (FASTPATH startup-config save/restore) — set `host` for those; identity facts (switch name, serial number) are still NSDP v1 only and require agent_mac.",
 				Validators: []validator.String{
 					stringvalidator.OneOf(client.ModelGS108Ev3, client.ModelGS108Tv2),
 				},
@@ -261,6 +267,13 @@ func (p *netgearPlusProvider) DataSources(_ context.Context) []func() datasource
 // interface — the resource layer never sees a concrete client type.
 //
 // Transport selection rule (dual-transport, implemented):
+//   - model = gs108tv2, vlan seam -> the composite text-config
+//     transport (textcfg_switch_transport.go): the FASTPATH emweb
+//     channel owns VLAN state on this model; identity facts ride
+//     NSDP v1 through the same cached client when agent_mac is also
+//     configured (see the rule below). The netgear_plus_switch data
+//     source routes through withSwitchIdentityTransport instead and
+//     keeps today's NSDP-v1-identity behavior.
 //   - agent_mac set              -> NSDP adapter via withNSDPClient: the
 //     shared device lock (deviceLockKey — the same lock domain as the
 //     NSDP-native resources and the HTTP branch, so HTTP and NSDP
@@ -282,6 +295,15 @@ func withSwitchTransport(ctx context.Context, data *providerData, fn func(switch
 		return fmt.Errorf("provider is not configured")
 	}
 
+	// gs108tv2 (milestone 3): the vlan-state seam runs ENTIRELY over
+	// the composite text-config transport (NSDP v1 has no VLAN
+	// datatypes, so the NSDP branch under this call would only hit the
+	// nsdpV1Guard refusal). The identity seam (netgear_plus_switch)
+	// keeps its NSDP-v1 behavior via withSwitchIdentityTransport.
+	if data.isGS108Tv2Model() {
+		return withTextcfgSwitchTransport(ctx, data, fn)
+	}
+
 	if data.agentMAC != "" {
 		return withNSDPClient(ctx, data, func(client nsdpClient) error {
 			return fn(nsdpSwitchTransport{
@@ -294,15 +316,6 @@ func withSwitchTransport(ctx context.Context, data *providerData, fn func(switch
 
 	if strings.TrimSpace(data.config.Host) == "" {
 		return fmt.Errorf("HTTP resources require the provider attribute host")
-	}
-
-	// gs108tv2 (FASTPATH/NSDP v1) has no web-UI transport at all: its
-	// firmware HTML is unrelated to the gs108ev3 Plus pages, so an
-	// HTTP-only configuration would fail later with a confusing
-	// "unsupported model" driver error. Fail here with the provenance
-	// remedy instead.
-	if strings.EqualFold(strings.TrimSpace(data.config.Model), client.ModelGS108Tv2) {
-		return fmt.Errorf("model %s is NSDP-only (its firmware has no Plus-line web UI): configure the provider attribute agent_mac instead of (or in addition to) host", client.ModelGS108Tv2)
 	}
 
 	key := data.deviceLockKey()
@@ -570,7 +583,11 @@ func flattenVLANState(ctx context.Context, state model.VLANState) ([]vlanAttribu
 	for _, vid := range state.VLANIDs() {
 		ports := make(map[string]string, state.PortCount)
 		for _, port := range state.SortedPorts() {
-			ports[fmt.Sprintf("%d", port)] = string(state.VLANs[vid].Ports[port])
+			m := state.VLANs[vid].Ports[port]
+			if m == model.PortMembershipIgnored {
+				continue
+			}
+			ports[fmt.Sprintf("%d", port)] = string(m)
 		}
 
 		portsValue, diags := types.MapValueFrom(ctx, types.StringType, ports)
